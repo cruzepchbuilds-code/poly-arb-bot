@@ -1,56 +1,55 @@
 export const CONFIG = {
-  // Assets to trade — mirrors spiralgalaxy (BTC + ETH 5-min markets)
-  assets: ["BTC", "ETH"],
+  assets: ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "MATIC"],
 
   binanceBaseUrl: "https://api.binance.com",
-  gammaBaseUrl: "https://gamma-api.polymarket.com",
-  clobBaseUrl: "https://clob.polymarket.com",
+  gammaBaseUrl:   "https://gamma-api.polymarket.com",
+  clobBaseUrl:    "https://clob.polymarket.com",
 
-  // 5-minute window config
-  windowMinutes: 5,
+  binanceSymbols: {
+    BTC:  "BTCUSDT",
+    ETH:  "ETHUSDT",
+    SOL:  "SOLUSDT",
+    XRP:  "XRPUSDT",
+    DOGE: "DOGEUSDT",
+    AVAX: "AVAXUSDT",
+    LINK: "LINKUSDT",
+    MATIC: "MATICUSDT",
+  },
 
-  // Arbitrage entry: only enter when YES + NO combined < this threshold
-  // spiralgalaxy's best trades were at 0.54. Start conservative at 0.85
-  // and tighten once you confirm it's working.
-  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.97,
+  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.95,
+  momentumMinPct: 0.0005,
 
-  // Max USDC to commit per market (both sides combined)
-  maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || 20,
+  kellyFraction:    0.50,
+  estimatedWinRate: 0.62,
+  minBetUsdc:       2,
+  maxBetPct:        0.30,
 
-  // Polymarket series slugs for 5-min markets
+  maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || null,
+  maxPositions: Number(process.env.MAX_POSITIONS) || 15,
+
+  earlyExitMinPrice: 0.88,
+  earlyExitMaxSecs:  25,
+
   polymarket: {
-    btcSeriesSlugs: [
-      "btc-up-or-down-in-5-minutes",
-      "bitcoin-up-or-down-5-min",
-      "btc-5min-up-or-down",
-    ],
-    ethSeriesSlugs: [
-      "eth-up-or-down-in-5-minutes",
-      "ethereum-up-or-down-5-min",
-      "eth-5min-up-or-down",
-    ],
+    btcSeriesSlugs:  ["btc-up-or-down-in-5-minutes","bitcoin-up-or-down-5-min","btc-5min-up-or-down","btc-updown-5m"],
+    ethSeriesSlugs:  ["eth-up-or-down-in-5-minutes","ethereum-up-or-down-5-min","eth-5min-up-or-down","eth-updown-5m"],
+    solSeriesSlugs:  ["sol-up-or-down-in-5-minutes","solana-up-or-down-5-min","sol-5min-up-or-down","sol-updown-5m"],
+    xrpSeriesSlugs:  ["xrp-up-or-down-in-5-minutes","ripple-up-or-down-5-min","xrp-5min-up-or-down","xrp-updown-5m"],
+    dogeSeriesSlugs: ["doge-up-or-down-in-5-minutes","dogecoin-up-or-down-5-min","doge-5min-up-or-down","doge-updown-5m"],
+    avaxSeriesSlugs: ["avax-up-or-down-in-5-minutes","avalanche-up-or-down-5-min","avax-5min-up-or-down","avax-updown-5m"],
+    linkSeriesSlugs: ["link-up-or-down-in-5-minutes","chainlink-up-or-down-5-min","link-5min-up-or-down","link-updown-5m"],
+    maticSeriesSlugs:["matic-up-or-down-in-5-minutes","polygon-up-or-down-5-min","matic-5min-up-or-down","matic-updown-5m"],
   },
 
-  // TA indicators (kept for the paper trader / signal display)
   indicators: {
-    rsiPeriod: 14,
-    macdFast: 12,
-    macdSlow: 26,
-    macdSignal: 9,
-    klinesInterval: "1m",
-    klinesLimit: 100,
-    vwapSlopePoints: 5,
+    rsiPeriod: 14, macdFast: 12, macdSlow: 26, macdSignal: 9,
+    klinesInterval: "1m", klinesLimit: 100, vwapSlopePoints: 5,
   },
 
-  paper: {
-    startBalance: 100,
-    tradeShares: 10,
-  },
+  paper: { startBalance: 100, tradeShares: 10 },
 
   refreshMs: {
-    klines: 10_000,
-    scan: 5_000,      // how often to scan for new arbitrage opportunities
-    clob: 3_000,      // how often to refresh prices on open positions
-    display: 1_000,
+    klines: 10_000, scan: 30_000, clob: 3_000, display: 1_000,
+    marketRefresh: 60_000, simSave: 30_000, priceSnap: 30_000,
   },
 };

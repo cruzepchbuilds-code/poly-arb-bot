@@ -11,15 +11,15 @@ function safeTimeMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
-// ── Market discovery ────────────────────────────────────────────────────────
+let _marketsCache = [];
+let _marketsCachedAt = 0;
 
-// Fetch all currently active 5-min up/down markets for BTC and ETH.
-// Returns array of: { id, asset, question, upTokenId, downTokenId, endMs }
 export async function fetchAll5minMarkets() {
+  if (Date.now() - _marketsCachedAt < 30_000) return _marketsCache;
+
   const results = [];
 
   try {
-    // Broad fetch of active markets — filter client-side for 5-min crypto
     const urls = [
       `${CONFIG.gammaBaseUrl}/markets?active=true&limit=100`,
       `${CONFIG.gammaBaseUrl}/markets?active=true&limit=100&tag_slug=crypto`,
@@ -32,40 +32,32 @@ export async function fetchAll5minMarkets() {
         if (!res.ok) continue;
         const data = await res.json();
         const markets = extractMarkets(data);
-        const filtered = markets.filter(is5minCryptoMarket);
+        const filtered = markets.filter(isCryptoUpDownMarket);
         results.push(...filtered);
       } catch { continue; }
     }
   } catch { /* ignore */ }
 
-  // Deduplicate by conditionId / id
   const seen = new Set();
   const unique = [];
   for (const m of results) {
     const key = m.conditionId || m.id || m.question;
-    if (!seen.has(key)) {
-      seen.add(key);
-      unique.push(m);
-    }
+    if (!seen.has(key)) { seen.add(key); unique.push(m); }
   }
 
-  return unique.map(normalize5minMarket).filter(Boolean);
+  const markets = unique.map(normalizeCryptoMarket).filter(Boolean);
+  _marketsCache = markets;
+  _marketsCachedAt = Date.now();
+  return markets;
 }
 
-// Fetch a single previously-active market by conditionId for price refresh
 export async function fetchMarketById(conditionId) {
   try {
-    const res = await fetch(
-      `${CONFIG.gammaBaseUrl}/markets/${conditionId}`,
-      { signal: AbortSignal.timeout(4000) }
-    );
+    const res = await fetch(`${CONFIG.gammaBaseUrl}/markets/${conditionId}`, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
-    const data = await res.json();
-    return normalize5minMarket(data);
+    return normalizeCryptoMarket(await res.json());
   } catch { return null; }
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 
 function extractMarkets(data) {
   if (!data) return [];
@@ -81,36 +73,46 @@ function extractMarkets(data) {
   return [data];
 }
 
-function is5minCryptoMarket(m) {
+function isCryptoUpDownMarket(m) {
   const q = String(m.question || m.title || m.slug || "").toLowerCase();
+
   const isCrypto =
-    q.includes("bitcoin") || q.includes(" btc") ||
-    q.includes("ethereum") || q.includes(" eth");
-  const isUpDown =
-    q.includes("up or down") || q.includes("higher") || q.includes("above");
+    q.includes("bitcoin")   || q.includes(" btc")  ||
+    q.includes("ethereum")  || q.includes(" eth")  ||
+    q.includes("solana")    || q.includes(" sol")  ||
+    q.includes("ripple")    || q.includes(" xrp")  ||
+    q.includes("dogecoin")  || q.includes(" doge") ||
+    q.includes("avalanche") || q.includes(" avax") ||
+    q.includes("chainlink") || q.includes(" link") ||
+    q.includes("polygon")   || q.includes(" matic");
 
-  // Check window duration ≈ 5 min
-  const start = safeTimeMs(m.startDate || m.startTime);
-  const end = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
+  const isUpDown = q.includes("up or down") || q.includes("higher") || q.includes("above");
+
+  const start    = safeTimeMs(m.startDate || m.startTime);
+  const end      = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
   const duration = start && end ? end - start : null;
-  const is5min = duration ? duration >= 4 * 60_000 && duration <= 6 * 60_000 : true;
+  const is5min   = duration ? duration >= 4  * 60_000 && duration <= 6  * 60_000 : true;
+  const is15min  = duration ? duration >= 12 * 60_000 && duration <= 18 * 60_000 : false;
+  const isOpen   = end ? end > Date.now() : true;
 
-  // Must be currently open
-  const now = Date.now();
-  const isOpen = end ? end > now : true;
-
-  return isCrypto && isUpDown && is5min && isOpen;
+  return isCrypto && isUpDown && (is5min || is15min) && isOpen;
 }
 
-function normalize5minMarket(m) {
+function normalizeCryptoMarket(m) {
   if (!m) return null;
 
   const question = String(m.question || m.title || "");
   const q = question.toLowerCase();
 
   const asset =
-    q.includes("bitcoin") || q.includes("btc") ? "BTC" :
-    q.includes("ethereum") || q.includes("eth") ? "ETH" : null;
+    q.includes("bitcoin")   || q.includes("btc")  ? "BTC"  :
+    q.includes("ethereum")  || q.includes("eth")  ? "ETH"  :
+    q.includes("solana")    || q.includes("sol")  ? "SOL"  :
+    q.includes("ripple")    || q.includes("xrp")  ? "XRP"  :
+    q.includes("dogecoin")  || q.includes("doge") ? "DOGE" :
+    q.includes("avalanche") || q.includes("avax") ? "AVAX" :
+    q.includes("chainlink") || q.includes("link") ? "LINK" :
+    q.includes("polygon")   || q.includes("matic")? "MATIC": null;
 
   if (!asset) return null;
 
@@ -120,25 +122,33 @@ function normalize5minMarket(m) {
   const tokens = getTokenIds(m);
   if (!tokens.upTokenId || !tokens.downTokenId) return null;
 
+  const startMs    = safeTimeMs(m.startDate || m.startTime);
+  const duration   = startMs ? endMs - startMs : null;
+  const windowMins = duration && duration > 8 * 60_000 ? 15 : 5;
+
+  let initialYes = null, initialNo = null;
+  try {
+    const prices = JSON.parse(m.outcomePrices ?? "[]");
+    const p0 = Number(prices[0]), p1 = Number(prices[1]);
+    if (Number.isFinite(p0)) initialYes = p0;
+    if (Number.isFinite(p1)) initialNo  = p1;
+  } catch { /* ignore */ }
+
   return {
     id: m.conditionId || m.id || m.slug || question,
-    asset,
-    question,
-    upTokenId: tokens.upTokenId,
-    downTokenId: tokens.downTokenId,
-    endMs,
+    asset, question, windowMins,
+    upTokenId: tokens.upTokenId, downTokenId: tokens.downTokenId,
+    endMs, initialYes, initialNo,
   };
 }
 
 function getTokenIds(market) {
   if (!market) return { upTokenId: null, downTokenId: null };
 
-  // clobTokenIds array: [yesId, noId]
   if (Array.isArray(market.clobTokenIds) && market.clobTokenIds.length >= 2) {
     return { upTokenId: market.clobTokenIds[0], downTokenId: market.clobTokenIds[1] };
   }
 
-  // tokens array with outcome labels
   if (Array.isArray(market.tokens)) {
     const up = market.tokens.find((t) => {
       const o = String(t.outcome || "").toLowerCase();
@@ -149,7 +159,7 @@ function getTokenIds(market) {
       return o === "down" || o === "no" || o === "lower" || o === "below";
     });
     return {
-      upTokenId: up?.token_id || up?.tokenId || null,
+      upTokenId:   up?.token_id   || up?.tokenId   || null,
       downTokenId: down?.token_id || down?.tokenId || null,
     };
   }
@@ -157,26 +167,17 @@ function getTokenIds(market) {
   return { upTokenId: null, downTokenId: null };
 }
 
-// ── CLOB pricing ─────────────────────────────────────────────────────────────
-
 async function fetchMidPrice(tokenId) {
   if (!tokenId) return null;
   try {
-    const res = await fetch(
-      `${CONFIG.clobBaseUrl}/midpoint?token_id=${tokenId}`,
-      { signal: AbortSignal.timeout(3000) }
-    );
+    const res = await fetch(`${CONFIG.clobBaseUrl}/midpoint?token_id=${tokenId}`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return null;
     const data = await res.json();
     return toNumber(data.mid ?? data.price ?? data.midpoint);
   } catch { return null; }
 }
 
-// Returns { yesPrice, noPrice } for a market
 export async function fetchClobMidPrices(upTokenId, downTokenId) {
-  const [yes, no] = await Promise.all([
-    fetchMidPrice(upTokenId),
-    fetchMidPrice(downTokenId),
-  ]);
+  const [yes, no] = await Promise.all([fetchMidPrice(upTokenId), fetchMidPrice(downTokenId)]);
   return { yesPrice: yes, noPrice: no };
 }
