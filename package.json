@@ -1,0 +1,16 @@
+{
+  "name": "btc-polymarket-paper-trader",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "live": "node src/index-live.js",
+    "setup": "node setup.js"
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^5.8.1",
+    "ethers": "^6.17.0",
+    "ws": "^8.18.0"
+  }
+}
