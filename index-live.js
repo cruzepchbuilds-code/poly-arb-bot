@@ -18,7 +18,6 @@ import { loadSimState, saveSimState } from "./data/simState.js";
 import { WindowPosition } from "./live/positions.js";
 import { DirectionalPosition } from "./live/directional.js";
 import { LateEntrySignal } from "./strategies/lateEntry.js";
-import { CopyTrader } from "./strategies/copyTrader.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 
@@ -153,7 +152,7 @@ class SweepStats {
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, sweepStats, copyTrader, usdcBalance,
+  activePositions, stats, lemStats, sweepStats, usdcBalance,
   walletAddr, opportunities, now, simBalance,
   wsConnected, wsLastUpdate, wsMarkets,
 }) {
@@ -311,28 +310,6 @@ function render({
     }
   }
 
-  // ── Copy trader section ──────────────────────────────────────────────────────
-  if (copyTrader?.wallet) {
-    out.push(row(""));
-    out.push(sec("COPY TRADER  (following bonereaper)"));
-    const pollAge = copyTrader.lastPoll ? `${Math.round((now - copyTrader.lastPoll) / 1000)}s ago` : "waiting";
-    const ctStatus = copyTrader.error
-      ? `${C.red}● ERR: ${copyTrader.error}${C.reset}`
-      : `${C.green}● LIVE${C.reset}`;
-    out.push(row(`${ctStatus}  ${C.dim}last poll: ${pollAge}  copied: ${C.bgreen}${copyTrader.copied}${C.dim}  skipped: ${copyTrader.skipped}${C.reset}`));
-    if (copyTrader.recentCopies.length === 0) {
-      out.push(row(`${C.dim}Watching for new trades...${C.reset}`));
-    } else {
-      for (const c of copyTrader.recentCopies) {
-        const ago = Math.round((now - c.ts) / 1000);
-        out.push(row(
-          `${C.cyan}COPY${C.reset} ${c.asset} ${C.yellow}${c.side}${C.reset} @${c.price.toFixed(3)}` +
-          `  $${c.betSize.toFixed(2)}  ${c.remainingS}s left  ${C.dim}${ago}s ago${C.reset}`
-        ));
-      }
-    }
-  }
-
   out.push(row(""));
   out.push(ftr());
   out.push(`  ${C.dim}${fmtTime(new Date(now))}  |  Ctrl+C to exit  |  log → trades.jsonl${C.reset}`);
@@ -404,7 +381,6 @@ async function main() {
   const lemStats          = new LemStats();
   const sweepStats        = new SweepStats();
   const lateEntry         = new LateEntrySignal();
-  const copyTrader        = new CopyTrader();
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
   let marketList          = [];
@@ -726,40 +702,7 @@ async function main() {
       .sort((a, b) => (a.yesPrice + a.noPrice) - (b.yesPrice + b.noPrice));
   };
 
-  // ── Copy trader (optional — set COPY_WALLET=0x... in .env) ─────────────────
-  const copyWallet = process.env.COPY_WALLET;
-  if (copyWallet) {
-    copyTrader.init({
-      wallet:     copyWallet,
-      getMarkets: () => marketList,
-      getActive:  () => activePositions,
-      getBalance: () => {
-        const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-        return Math.max(0, simBalance - allocated);
-      },
-      onEntry: async ({ market, side, tokenId, price, betSize }) => {
-        if (activePositions.has(market.id) || enteringMarkets.has(market.id)) return false;
-        if (activePositions.size >= 6) return false;
-        enteringMarkets.add(market.id);
-        try {
-          const binanceOpenPrice = lateEntry.getOpenPrice(market.id) ?? feeds[market.asset]?.get() ?? null;
-          const pos = new DirectionalPosition({
-            id: market.id, asset: market.asset,
-            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
-          });
-          const entered = await pos.enter(price, betSize);
-          if (entered) {
-            simBalance -= pos.totalSpent ?? 0;
-            activePositions.set(market.id, pos);
-            lemStats.entered++;
-          }
-          return entered;
-        } finally { enteringMarkets.delete(market.id); }
-      },
-    });
-    copyTrader.start();
-    console.log(`Copy trader active — following ${copyWallet.slice(0, 10)}...`);
-  }
+
 
   // ── Start all loops ─────────────────────────────────────────────────────────
   await refreshMarkets();
@@ -777,7 +720,7 @@ async function main() {
       feedPrices:    Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:      Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, sweepStats, copyTrader, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, sweepStats, usdcBalance, walletAddr,
       opportunities: getOpportunities(),
       now:           Date.now(),
       simBalance,
@@ -790,7 +733,6 @@ async function main() {
   // ── Graceful shutdown ───────────────────────────────────────────────────────
   process.on("SIGINT", async () => {
     clobWs.close();
-    copyTrader.stop();
     for (const feed of Object.values(feeds)) feed.close();
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
