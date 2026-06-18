@@ -12,10 +12,10 @@ export const CONFIG = {
   // Arbitrage entry: only enter when YES + NO combined < this threshold
   // spiralgalaxy's best trades were at 0.54. Start conservative at 0.85
   // and tighten once you confirm it's working.
-  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.85,
+  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.97,
 
   // Max USDC to commit per market (both sides combined)
-  maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || 100,
+  maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || 20,
 
   // Polymarket series slugs for 5-min markets
   polymarket: {
@@ -43,7 +43,7 @@ export const CONFIG = {
   },
 
   paper: {
-    startBalance: 1000,
+    startBalance: 100,
     tradeShares: 10,
   },
 

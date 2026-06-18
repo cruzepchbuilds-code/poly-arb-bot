@@ -91,13 +91,13 @@ class Stats {
 }
 
 // ── Render ──────────────────────────────────────────────────────────────────
-function render({ btcPrice, ethPrice, activePositions, stats, usdcBalance, walletAddr, opportunities, now }) {
+function render({ btcPrice, ethPrice, activePositions, stats, usdcBalance, simBalance, walletAddr, opportunities, now }) {
   const out = ["\x1b[2J\x1b[H"];
   const mode = LIVE ? `${C.bred}● LIVE${C.reset}` : `${C.yellow}● SIM${C.reset}`;
 
   out.push(hdr(`Polymarket 5-Min Arb Bot  ${mode}`));
   out.push(row(`${C.dim}Wallet: ${walletAddr ?? "not set"}${C.reset}`));
-  out.push(row(`${C.dim}USDC:   ${usdcBalance != null ? fmtUsd(usdcBalance) : "N/A"}  │  BTC: ${btcPrice != null ? fmtUsd(btcPrice) : "connecting..."}  │  ETH: ${ethPrice != null ? fmtUsd(ethPrice) : "connecting..."}${C.reset}`));
+  out.push(row(`${C.dim}Sim: ${C.bgreen}${fmtUsd(simBalance)}${C.reset}${C.dim}  │  BTC: ${btcPrice != null ? fmtUsd(btcPrice) : "connecting..."}  │  ETH: ${ethPrice != null ? fmtUsd(ethPrice) : "connecting..."}${C.reset}`));
   out.push(row(""));
 
   out.push(sec("SCANNING"));
@@ -224,6 +224,7 @@ async function main() {
   const stats = new Stats();
   let usdcBalance = null;
   let opportunities = [];
+  let simBalance = CONFIG.paper.startBalance;
 
   // Refresh USDC balance every 60s
   setInterval(async () => {
@@ -234,7 +235,6 @@ async function main() {
   // ── Scanner: find opportunities and enter ─────────────────────────────────
   const scan = async () => {
     const threshold = Number(process.env.COMBINED_THRESHOLD) || CONFIG.combinedThreshold;
-    const maxUsdc = Number(process.env.MAX_TRADE_USDC) || CONFIG.maxTradeUsdc;
 
     let markets = [];
     try { markets = await fetchAll5minMarkets(); } catch { return; }
@@ -269,8 +269,13 @@ async function main() {
           windowEndMs: market.endMs,
         });
 
-        const entered = await pos.enter(yesPrice, noPrice, maxUsdc);
+        const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+        const available = Math.max(0, simBalance - allocated);
+        const kellyBet = available * ((1 - combined) / combined) * 0.5;
+        const betSize = Math.max(1, Math.min(kellyBet, available * 0.35));
+        const entered = await pos.enter(yesPrice, noPrice, betSize);
         if (entered) {
+          simBalance -= pos.totalSpent ?? 0;
           activePositions.set(market.id, pos);
           stats.entered++;
         }
@@ -298,6 +303,7 @@ async function main() {
       if (pos.expired) {
         await pos.cancelAll().catch(() => {});
         stats.record(pos);
+        { const p = pos.summary; simBalance += p.upFilled && p.downFilled ? p.shares * 1.00 : (p.upFilled || p.downFilled) ? p.shares * 0.50 : 0; }
         activePositions.delete(id);
       }
     }
@@ -316,6 +322,7 @@ async function main() {
       activePositions,
       stats,
       usdcBalance,
+      simBalance,
       walletAddr,
       opportunities,
       now: Date.now(),
