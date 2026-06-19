@@ -445,7 +445,7 @@ async function main() {
   });
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
-  const startBalance      = CONFIG.paper.startBalance;
+  let startBalance        = CONFIG.paper.startBalance;
 
   // Load all past trades from disk for history table + chart reconstruction
   const allTradeHistory   = loadTrades().sort((a, b) => (a.enteredAt ?? 0) - (b.enteredAt ?? 0));
@@ -980,7 +980,14 @@ async function main() {
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }
-  if (LIVE && usdcBalance != null && usdcBalance > 0) simBalance = usdcBalance;
+  if (LIVE && usdcBalance != null && usdcBalance > 0) {
+    simBalance = usdcBalance;
+    startBalance = usdcBalance;
+    pnlHistory.splice(0, pnlHistory.length, { t: Date.now(), v: usdcBalance });
+    console.error(`[bot] Live balance: $${usdcBalance.toFixed(2)} USDC`);
+  } else if (LIVE) {
+    console.error("[bot] WARNING: USDC balance fetch failed — verify POLY_API_KEY, POLY_API_SECRET, POLY_PASSPHRASE in .env");
+  }
 
   const runAnalysis = () => { try { _analytics = analyzeTrades(); } catch { /* ignore */ } };
   setInterval(runAnalysis, 5 * 60_000); // re-analyze every 5 min
