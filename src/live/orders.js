@@ -69,9 +69,11 @@ export async function getUsdcBalance() {
   const client = getClient();
   try {
     const b = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    console.error("[balance] raw response:", JSON.stringify(b));
     const raw = Number(b?.balance ?? 0);
     return raw > 10_000 ? raw / 1e6 : raw;
-  } catch {
+  } catch (e) {
+    console.error("[balance] getBalanceAllowance error:", e?.message ?? e);
     return null;
   }
 }
