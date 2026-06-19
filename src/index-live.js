@@ -888,7 +888,7 @@ async function main() {
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
   setInterval(lateEntryCheck,  2_000);
-  setInterval(sniperCheck,     2_000);
+  // setInterval(sniperCheck,     2_000); // disabled — high variance, low frequency
   setInterval(fadeCheck,       2_000);
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
