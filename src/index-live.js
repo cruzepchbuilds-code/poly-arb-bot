@@ -724,7 +724,7 @@ async function main() {
           const pos = new DirectionalPosition({
             id: market.id, asset: market.asset,
             side: signal.side, tokenId: signal.tokenId,
-            binanceOpenPrice: fade.getOpenPrice ? fade._openPrices.get(market.id)?.price : null,
+            binanceOpenPrice: feeds[market.asset]?.get() ?? null,
             windowEndMs: market.endMs,
           });
           pos.enteredSecsLeft = Math.round((market.endMs - Date.now()) / 1000);
@@ -795,7 +795,7 @@ async function main() {
     try {
       for (const [id, pos] of activePositions) {
         if (pos.type === "directional") {
-          if (!pos.sniper && !pos.expired && pos.filled) {
+          if (!pos.sniper && !pos.fade && !pos.expired && pos.filled) {
             const tokenPrice = clobWs.getMid(pos.tokenId);
             const secsLeft   = pos.remainingMs / 1000;
             if (
