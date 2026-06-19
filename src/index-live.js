@@ -867,7 +867,7 @@ async function main() {
     prices:      Object.fromEntries(CONFIG.assets.map(a => [a, feeds[a]?.get() ?? null])),
     momentums:   Object.fromEntries(CONFIG.assets.map(a => [a, getMomentum(a)])),
     activePositions: [...activePositions.values()].map(p => p.summary),
-    arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills },
+    arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills, guaranteedProfit: stats.guaranteedProfit, totalSpent: stats.totalSpent },
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
     sniper: { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
     fade:   { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
