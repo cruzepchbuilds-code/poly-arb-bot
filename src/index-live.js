@@ -13,6 +13,7 @@ import { WindowPosition } from "./live/positions.js";
 import { DirectionalPosition } from "./live/directional.js";
 import { LateEntrySignal } from "./strategies/lateEntry.js";
 import { ContrarianSniper } from "./strategies/contrarian.js";
+import { FadeMomentum } from "./strategies/fadeMomentum.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
@@ -125,6 +126,22 @@ class SweepStats {
 }
 
 class SniperStats {
+  constructor() {
+    this.entered = 0; this.won = 0; this.lost = 0;
+    this.totalSpent = 0; this.totalPayout = 0;
+    this.history = [];
+  }
+  record(s) {
+    if (s.won === true) this.won++;
+    else if (s.won === false) this.lost++;
+    this.totalSpent  += s.totalSpent ?? 0;
+    this.totalPayout += s.payout ?? 0;
+    this.history.unshift(s);
+    if (this.history.length > 10) this.history.pop();
+  }
+}
+
+class FadeStats {
   constructor() {
     this.entered = 0; this.won = 0; this.lost = 0;
     this.totalSpent = 0; this.totalPayout = 0;
@@ -401,6 +418,8 @@ async function main() {
   const lemStats          = new LemStats();
   const sweepStats        = new SweepStats();
   const sniperStats = new SniperStats();
+  const fadeStats   = new FadeStats();
+  const fade        = new FadeMomentum();
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
   let _seedWins = 0, _seedLosses = 0;
@@ -515,6 +534,7 @@ async function main() {
       const openPx = feeds[market.asset]?.get() ?? null;
       lateEntry.recordOpen(market.id, openPx);
       sniper.recordOpen(market.id, openPx);
+      fade.recordOpen(market.id, openPx);
     }
     clobWs.addMarkets(markets);
     marketList = markets;
@@ -655,6 +675,47 @@ async function main() {
     } finally { isLateEntryChecking = false; }
   };
 
+  const fadeCheck = () => {
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const currentPrice = feeds[market.asset]?.get() ?? null;
+      const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
+      const signal = fade.getSignal(market, yesPrice, noPrice, currentPrice);
+      if (!signal.side) continue;
+
+      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const available = Math.max(0, simBalance - allocated);
+      const betSize   = Math.min(fade.calcBetSize(simBalance), available);
+      if (betSize < 1) continue;
+
+      fade.markFired(market.id);
+      enteringMarkets.add(market.id);
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side: signal.side, tokenId: signal.tokenId,
+            binanceOpenPrice: fade.getOpenPrice ? fade._openPrices.get(market.id)?.price : null,
+            windowEndMs: market.endMs,
+          });
+          pos.fade = true;
+          const entered = await pos.enter(signal.tokenPrice, betSize);
+          if (entered) {
+            simBalance -= pos.totalSpent ?? 0;
+            activePositions.set(market.id, pos);
+            fadeStats.entered++;
+          } else {
+            fade.clearMarket(market.id);
+          }
+        } finally { enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
   const sniperCheck = () => {
     const now = Date.now();
     for (const market of marketList) {
@@ -735,6 +796,11 @@ async function main() {
               sniperStats.record(s);
               sniper.recordResult(s.won);
               sniper.clearMarket(id);
+            } else if (pos.fade) {
+              logTrade({ ...s, strategy: "FADE" });
+              fadeStats.record(s);
+              fade.recordResult(s.won);
+              fade.clearMarket(id);
             } else {
               logTrade({ ...s, strategy: "LEM" });
               lemStats.record(s);
@@ -792,6 +858,7 @@ async function main() {
     arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills },
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
     sniper: { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
+    fade:   { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
     sweep:  { followed: sweepStats.followed },
     recentTrades: [...sniperStats.history, ...lemStats.history, ...stats.history]
       .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 15),
@@ -804,6 +871,7 @@ async function main() {
   setInterval(monitor,         CONFIG.refreshMs.clob);
   setInterval(lateEntryCheck,  2_000);
   setInterval(sniperCheck,     2_000);
+  setInterval(fadeCheck,       2_000);
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }

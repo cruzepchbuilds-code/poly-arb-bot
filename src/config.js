@@ -16,7 +16,7 @@ export const CONFIG = {
     MATIC: "MATICUSDT",
   },
 
-  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.95,
+  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.98,
   momentumMinPct: 0.0005,
 
   kellyFraction:    0.50,

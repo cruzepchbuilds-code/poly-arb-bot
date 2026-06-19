@@ -193,15 +193,23 @@ function render(d) {
   }).join('');
 
   // Strategy cards
-  const s = d.sniper ?? {}, l = d.lem ?? {}, arb = d.arb ?? {}, sw = d.sweep ?? {};
-  const sWr = s.tradeCount > 0 ? ((s.won/(s.won+s.lost||1))*100).toFixed(1)+'%' : (s.winRate*100).toFixed(1)+'%*';
+  const s = d.sniper ?? {}, l = d.lem ?? {}, arb = d.arb ?? {}, sw = d.sweep ?? {}, fd = d.fade ?? {};
+  const sWr = s.tradeCount > 0 ? ((s.won/(s.won+s.lost||1))*100).toFixed(1)+'%' : (s.winRate != null ? (s.winRate*100).toFixed(1)+'%*' : '—');
   const lWr = (l.won + l.lost) > 0 ? ((l.won/(l.won+l.lost))*100).toFixed(1)+'%' : '—';
+  const fWr = (fd.won + fd.lost) > 0 ? ((fd.won/(fd.won+fd.lost))*100).toFixed(1)+'%' : '—';
+  const fadePnl = (fd.totalPayout ?? 0) - (fd.totalSpent ?? 0);
   document.getElementById('cards').innerHTML = \`
     <div class="card sniper">
-      <div class="card-title">Sniper</div>
+      <div class="card-title">Sniper (&lt;12¢)</div>
       <div class="card-main">\${s.entered ?? 0}</div>
       <div class="card-sub">\${s.won ?? 0}W / \${s.lost ?? 0}L · WR \${sWr}</div>
       <div class="card-pnl \${pnlClass(sniperPnl)}">\${fmtPnl(sniperPnl)}</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Fade (20-45¢)</div>
+      <div class="card-main">\${fd.entered ?? 0}</div>
+      <div class="card-sub">\${fd.won ?? 0}W / \${fd.lost ?? 0}L · WR \${fWr}</div>
+      <div class="card-pnl \${pnlClass(fadePnl)}">\${fmtPnl(fadePnl)}</div>
     </div>
     <div class="card">
       <div class="card-title">LEM</div>
@@ -215,7 +223,7 @@ function render(d) {
       <div class="card-sub">Both filled: \${arb.bothFilled ?? 0}</div>
     </div>
     <div class="card">
-      <div class="card-title">Sweep Follow</div>
+      <div class="card-title">Sweep</div>
       <div class="card-main">\${sw.followed ?? 0}</div>
       <div class="card-sub">Order-book momentum</div>
     </div>
