@@ -40,13 +40,13 @@ const fmtPx = (p, asset) => {
 
 // Kraken REST pairs — polls all assets in one request every 2s
 const KRAKEN_PAIRS = {
-  BTC: "XBTUSD", ETH: "ETHUSD", SOL: "SOLUSD", XRP: "XRPUSD",
-  DOGE: "DOGEUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  BTC: "XBTUSD", ETH: "ETHUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
+  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD",
 };
 // Kraken returns these keys in the result object
 const KRAKEN_RESULT_KEYS = {
   BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
-  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD",
 };
 
 function startPriceFeeds(assets) {
@@ -63,7 +63,7 @@ function startPriceFeeds(assets) {
         { signal: AbortSignal.timeout(3000) });
       if (!res.ok) return;
       const json = await res.json();
-      if (json.error?.length) return;
+      if (!json.result) return;
       for (const asset of assets) {
         const key = KRAKEN_RESULT_KEYS[asset];
         const data = json.result?.[key] ?? json.result?.[KRAKEN_PAIRS[asset]];
