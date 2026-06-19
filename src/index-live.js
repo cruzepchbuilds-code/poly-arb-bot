@@ -445,6 +445,9 @@ async function main() {
   });
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
+  const startBalance      = CONFIG.paper.startBalance;
+  const pnlHistory        = [{ t: Date.now(), v: simBalance }];
+  const trackPnl          = () => { pnlHistory.push({ t: Date.now(), v: simBalance }); if (pnlHistory.length > 500) pnlHistory.shift(); };
   let marketList          = [];
   let isMonitoring        = false;
   let isFallbackScanning  = false;
@@ -786,6 +789,7 @@ async function main() {
               pos.resolveEarly(tokenPrice);
               const s = pos.summary;
               simBalance += s.payout;
+              trackPnl();
               logTrade({ ...s, strategy: "LEM-EARLY" });
               lemStats.record(s);
               lateEntry.clearMarket(id);
@@ -800,6 +804,7 @@ async function main() {
             pos.resolveInSim(feeds[pos.asset]?.get() ?? null);
             const s = pos.summary;
             simBalance += s.payout;
+            trackPnl();
             if (pos.sniper) {
               logTrade({ ...s, strategy: "SNIPER" });
               sniperStats.record(s);
@@ -838,6 +843,7 @@ async function main() {
             if (s.upFilled && s.downFilled) simBalance += (s.shares ?? 0) * 1.00;
             else if (s.upFilled || s.downFilled) simBalance += (s.shares ?? 0) * 0.50;
             else simBalance += s.totalSpent ?? 0;
+            trackPnl();
             logTrade(s);
             stats.record(pos);
             clobWs.removeMarket(id);
@@ -876,8 +882,10 @@ async function main() {
       const { yesPrice, noPrice } = clobWs.getPrices(m.upTokenId, m.downTokenId);
       return { asset: m.asset, up: yesPrice, dn: noPrice, endMs: m.endMs };
     }),
-    recentTrades: [...sniperStats.history, ...lemStats.history, ...stats.history]
-      .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 15),
+    recentTrades: [...sniperStats.history, ...lemStats.history, ...fadeStats.history, ...stats.history]
+      .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 50),
+    pnlHistory:  pnlHistory.slice(-200),
+    startBalance,
     analytics: _analytics,
     adaptive:  adaptive.getStats(),
     timestamp: Date.now(),

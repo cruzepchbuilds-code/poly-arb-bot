@@ -117,6 +117,7 @@ export class DirectionalPosition {
       enteredAt: this.enteredAt,
       enteredSecsLeft: this.enteredSecsLeft ?? null,
       momentumPct: this.momentumPct ?? null,
+      strategy: this.sniper ? "SNIPER" : this.fade ? "FADE" : "LEM",
       log: [...this.log],
     };
   }
