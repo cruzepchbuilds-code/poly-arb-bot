@@ -118,11 +118,32 @@ export class ClobWsFeed {
     this.lastUpdate = Date.now();
 
     const tokenId = msg.asset_id;
-    const buys  = Array.isArray(msg.buy)  ? msg.buy  : [];
-    const sells = Array.isArray(msg.sell) ? msg.sell : [];
+    const existing = this._prices.get(tokenId);
+    let bid = existing?.bid ?? null;
+    let ask = existing?.ask ?? null;
 
-    const bid = buys.length  ? Math.max(...buys.map(o  => Number(o.price))) : null;
-    const ask = sells.length ? Math.min(...sells.map(o => Number(o.price))) : null;
+    if (msg.event_type === "book") {
+      // Full order book snapshot — Polymarket sends bids/asks (not buy/sell)
+      const bids = Array.isArray(msg.bids) ? msg.bids : [];
+      const asks = Array.isArray(msg.asks) ? msg.asks : [];
+      const newBid = bids.length ? Math.max(...bids.map(o => Number(o.price)).filter(Number.isFinite)) : null;
+      const newAsk = asks.length ? Math.min(...asks.map(o => Number(o.price)).filter(Number.isFinite)) : null;
+      if (newBid != null) bid = newBid;
+      if (newAsk != null) ask = newAsk;
+    } else if (msg.event_type === "price_change") {
+      // Incremental changes: [{price, size, side: "BUY"|"SELL"}]
+      const changes = Array.isArray(msg.changes) ? msg.changes : [];
+      const buys  = changes.filter(c => c.side === "BUY"  && Number(c.size) > 0);
+      const sells = changes.filter(c => c.side === "SELL" && Number(c.size) > 0);
+      if (buys.length)  bid = Math.max(...buys.map(o  => Number(o.price)).filter(Number.isFinite));
+      if (sells.length) ask = Math.min(...sells.map(o => Number(o.price)).filter(Number.isFinite));
+    } else if (msg.event_type === "last_trade_price") {
+      const p = Number(msg.price);
+      if (Number.isFinite(p) && p > 0 && bid == null && ask == null) bid = p;
+    } else {
+      return;
+    }
+
     const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (bid ?? ask ?? null);
     if (mid == null) return;
 
