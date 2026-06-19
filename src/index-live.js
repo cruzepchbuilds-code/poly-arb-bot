@@ -475,7 +475,7 @@ async function main() {
 
   const kellySizeBet = (combined) => {
     const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-    const available = Math.max(0, simBalance - allocated);
+    const available = Math.max(0, simBalance - allocated); // simBalance already has _reservedUsdc deducted
     const kelly     = available * ((1 - combined) / combined) * 1.5;
     return Math.max(1, Math.min(kelly, available * 0.35));
   };
@@ -496,12 +496,23 @@ async function main() {
   const clobWs = new ClobWsFeed();
   clobWs.setThreshold(getThreshold());
 
+  let _reservedUsdc = 0; // tracks in-flight bet budget to prevent concurrent over-allocation
+
   clobWs.onOpportunity((marketId, yesPrice, noPrice) => {
     if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return;
     if (activePositions.size >= CONFIG.maxPositions) return;
     const market = marketList.find((m) => m.id === marketId) ?? arbMarketList.find((m) => m.id === marketId);
-    if (!market || market.endMs - Date.now() < 60_000) return;
+    if (!market || market.endMs - Date.now() < 30_000) return;
 
+    // Recheck with ask prices — mid shows gap but we fill at ask
+    const askYes = clobWs.getAsk(market.upTokenId) ?? yesPrice;
+    const askNo  = clobWs.getAsk(market.downTokenId) ?? noPrice;
+    if (askYes + askNo >= getThreshold()) return;
+
+    const bet = kellySizeBet(askYes + askNo);
+    if (bet < 1) return;
+    simBalance -= bet;           // reserve synchronously so next callback sees lower balance
+    _reservedUsdc += bet;
     enteringMarkets.add(marketId);
     (async () => {
       try {
@@ -510,9 +521,16 @@ async function main() {
           upTokenId: market.upTokenId, downTokenId: market.downTokenId,
           windowEndMs: market.endMs,
         });
-        const entered = await pos.enter(yesPrice, noPrice, kellySizeBet(yesPrice + noPrice));
-        if (entered) { simBalance -= pos.totalSpent ?? 0; activePositions.set(market.id, pos); stats.entered++; }
-      } finally { enteringMarkets.delete(marketId); }
+        const entered = await pos.enter(askYes, askNo, bet);
+        if (entered) {
+          activePositions.set(market.id, pos);
+          stats.entered++;
+          // Adjust for actual spend vs reserved estimate
+          simBalance += bet - (pos.totalSpent ?? 0);
+        } else {
+          simBalance += bet; // restore if entry failed
+        }
+      } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(marketId); }
     })();
   });
 
@@ -522,13 +540,15 @@ async function main() {
     const market = marketList.find((m) => m.id === marketId);
     if (!market || market.endMs - Date.now() < 15_000) return;
 
+    const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+    const available = Math.max(0, simBalance - allocated);
+    const betSize   = Math.min(simBalance * 0.07, available);
+    if (betSize < 1) return;
+    simBalance -= betSize;
+    _reservedUsdc += betSize;
     enteringMarkets.add(marketId);
     (async () => {
       try {
-        const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-        const available = Math.max(0, simBalance - allocated);
-        const betSize   = Math.min(simBalance * 0.07, available);
-        if (betSize < 1) return;
         const binanceOpenPrice = lateEntry.getOpenPrice(market.id) ?? feeds[market.asset]?.get() ?? null;
         const pos = new DirectionalPosition({
           id: market.id, asset: market.asset,
@@ -536,7 +556,7 @@ async function main() {
         });
         const entered = await pos.enter(price, betSize);
         if (entered) {
-          simBalance -= pos.totalSpent ?? 0;
+          simBalance += betSize - (pos.totalSpent ?? 0);
           activePositions.set(market.id, pos);
           lemStats.entered++;
           sweepStats.record({
@@ -545,8 +565,8 @@ async function main() {
             remainingS: Math.round((market.endMs - Date.now()) / 1000),
             ts: Date.now(),
           });
-        }
-      } finally { enteringMarkets.delete(marketId); }
+        } else { simBalance += betSize; }
+      } catch { simBalance += betSize; } finally { _reservedUsdc -= betSize; enteringMarkets.delete(marketId); }
     })();
   });
 
@@ -597,9 +617,16 @@ async function main() {
         } catch { continue; }
 
         if (yesPrice == null || noPrice == null) continue;
-        const combined = yesPrice + noPrice;
-        if (combined >= t || market.endMs - Date.now() < 60_000) continue;
+        if (yesPrice + noPrice >= t || market.endMs - Date.now() < 30_000) continue;
+        // Prefer WS ask prices — REST mid might show gap that doesn't exist at ask
+        const askYes = clobWs.getAsk(market.upTokenId) ?? yesPrice;
+        const askNo  = clobWs.getAsk(market.downTokenId) ?? noPrice;
+        if (askYes + askNo >= t) continue;
 
+        const bet = kellySizeBet(askYes + askNo);
+        if (bet < 1) continue;
+        simBalance -= bet;
+        _reservedUsdc += bet;
         enteringMarkets.add(market.id);
         try {
           const pos = new WindowPosition({
@@ -607,9 +634,13 @@ async function main() {
             upTokenId: market.upTokenId, downTokenId: market.downTokenId,
             windowEndMs: market.endMs,
           });
-          const entered = await pos.enter(yesPrice, noPrice, kellySizeBet(combined));
-          if (entered) { simBalance -= pos.totalSpent ?? 0; activePositions.set(market.id, pos); stats.entered++; }
-        } finally { enteringMarkets.delete(market.id); }
+          const entered = await pos.enter(askYes, askNo, bet);
+          if (entered) {
+            simBalance += bet - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            stats.entered++;
+          } else { simBalance += bet; }
+        } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(market.id); }
       }
     } finally { isFallbackScanning = false; }
   };
@@ -631,7 +662,7 @@ async function main() {
       if (!correlated.includes(market.asset)) continue;
       const wm        = market.windowMins ?? 5;
       const remaining = market.endMs - now;
-      if (remaining < wm * 3_000 || remaining > wm * 36_000) continue;
+      if (remaining < wm * 48_000 || remaining > wm * 59_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -645,20 +676,26 @@ async function main() {
       const entryPrice = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (entryPrice == null || entryPrice > 0.85) continue;
 
+      const cxAllocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const cxAvailable = Math.max(0, simBalance - cxAllocated);
+      const betSize     = Math.min(simBalance * 0.05, cxAvailable) * crossConf;
+      if (betSize < 1) continue;
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
       enteringMarkets.add(market.id);
       (async () => {
         try {
-          const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-          const available = Math.max(0, simBalance - allocated);
-          const betSize   = Math.min(simBalance * 0.05, available) * crossConf;
-          if (betSize < 1) return;
           const pos = new DirectionalPosition({
             id: market.id, asset: market.asset,
             side: triggerSide, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
           });
           const entered = await pos.enter(entryPrice, betSize);
-          if (entered) { simBalance -= pos.totalSpent ?? 0; activePositions.set(market.id, pos); lemStats.entered++; }
-        } finally { enteringMarkets.delete(market.id); }
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            lemStats.entered++;
+          } else { simBalance += betSize; }
+        } catch { simBalance += betSize; } finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
       })();
     }
   };
@@ -696,12 +733,13 @@ async function main() {
         const entryPrice = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
         if (entryPrice == null || entryPrice > 0.85) continue;
 
+        const betSize = kellyBet(entryPrice, signal.confidence) * adaptive.getMultiplier(market.asset, "LEM");
+        if (betSize < CONFIG.minBetUsdc) continue;
+        simBalance -= betSize;
+        _reservedUsdc += betSize;
         enteringMarkets.add(market.id);
         (async () => {
           try {
-            const betSize = kellyBet(entryPrice, signal.confidence) * adaptive.getMultiplier(market.asset, "LEM");
-            if (betSize < CONFIG.minBetUsdc) return;
-
             const pos = new DirectionalPosition({
               id: market.id, asset: market.asset,
               side: signal.side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
@@ -710,12 +748,12 @@ async function main() {
             pos.momentumPct = getMomentum(market.asset);
             const entered = await pos.enter(entryPrice, betSize);
             if (entered) {
-              simBalance -= pos.totalSpent ?? 0;
+              simBalance += betSize - (pos.totalSpent ?? 0);
               activePositions.set(market.id, pos);
               lemStats.entered++;
               if (signal.confidence >= 0.5) tryCrossAssetEntry(market.asset, signal.side, signal.confidence);
-            }
-          } finally { enteringMarkets.delete(market.id); }
+            } else { simBalance += betSize; }
+          } catch { simBalance += betSize; } finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
         })();
       }
     } finally { isLateEntryChecking = false; }

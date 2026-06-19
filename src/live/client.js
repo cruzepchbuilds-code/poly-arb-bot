@@ -45,6 +45,9 @@ export function getClient() {
 
 export function walletAddress() {
   const rawKey = process.env.PRIVATE_KEY || "";
-  const key = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
-  return privateKeyToAccount(key).address;
+  if (!rawKey) return null;
+  try {
+    const key = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
+    return privateKeyToAccount(key).address;
+  } catch { return null; }
 }

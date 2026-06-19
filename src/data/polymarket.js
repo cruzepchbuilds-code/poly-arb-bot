@@ -95,7 +95,7 @@ export async function fetchAll5minMarkets() {
   if (Date.now() - _marketsCachedAt < 15_000) return _marketsCache;
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const currentEnd = Math.ceil(nowSec / 300) * 300 || (Math.floor(nowSec / 300) + 1) * 300;
+  const currentEnd = Math.ceil(nowSec / 300) * 300;
   const windows = [currentEnd, currentEnd + 300, currentEnd + 600];
 
   const fetches = [];
@@ -149,7 +149,7 @@ let _arbCache = [];
 let _arbCachedAt = 0;
 
 export async function fetchArbCandidates() {
-  if (Date.now() - _arbCachedAt < 120_000) return _arbCache;
+  if (Date.now() - _arbCachedAt < 60_000) return _arbCache;
 
   const now = Date.now();
   const results = [];
@@ -168,7 +168,7 @@ export async function fetchArbCandidates() {
       if (!tokens.upTokenId || !tokens.downTokenId) continue;
 
       const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
-      if (!endMs || endMs <= now + 60_000) continue;
+      if (!endMs || endMs <= now + 30_000) continue;
 
       let initialYes = null, initialNo = null;
       try {
