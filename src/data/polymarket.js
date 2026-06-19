@@ -90,16 +90,13 @@ function isCryptoUpDownMarket(m) {
 
   const isUpDown =
     q.includes("up or down") || q.includes("higher") || q.includes("above") ||
-    q.includes("lower or higher") || q.includes("go up") || q.includes("price up");
+    q.includes("lower or higher") || q.includes("go up") || q.includes("price up") ||
+    q.includes("will") || q.includes("reach") || q.includes("exceed");
 
-  const start    = safeTimeMs(m.startDate || m.startTime);
-  const end      = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
-  const duration = start && end ? end - start : null;
-  const is5min   = duration ? duration >= 4  * 60_000 && duration <= 6  * 60_000 : true;
-  const is15min  = duration ? duration >= 12 * 60_000 && duration <= 18 * 60_000 : false;
-  const isOpen   = end ? end > Date.now() : true;
+  const end    = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
+  const isOpen = end ? end > Date.now() : true;
 
-  return isCrypto && isUpDown && (is5min || is15min) && isOpen;
+  return isCrypto && isUpDown && isOpen;
 }
 
 function normalizeCryptoMarket(m) {
@@ -128,7 +125,11 @@ function normalizeCryptoMarket(m) {
 
   const startMs    = safeTimeMs(m.startDate || m.startTime);
   const duration   = startMs ? endMs - startMs : null;
-  const windowMins = duration && duration > 8 * 60_000 ? 15 : 5;
+  const windowMins = duration
+    ? duration <= 6 * 60_000  ? 5
+    : duration <= 18 * 60_000 ? 15
+    : Math.round(duration / 60_000)   // preserve actual duration in minutes
+    : 1440;
 
   let initialYes = null, initialNo = null;
   try {

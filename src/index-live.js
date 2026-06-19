@@ -531,6 +531,7 @@ async function main() {
       const now = Date.now();
       for (const market of marketList) {
         const wm        = market.windowMins ?? 5;
+        if (wm > 15) continue; // LEM only meaningful on short windows
         const remaining = market.endMs - now;
         if (remaining < wm * 3_000 || remaining > wm * 36_000) continue;
         if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
