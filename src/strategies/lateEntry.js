@@ -86,8 +86,8 @@ export class LateEntrySignal {
     const score    = (windowDelta * 5 + momentum * 2 + trend15m * 2) / 9;
     const absScore = Math.abs(score);
 
-    // Lowered threshold: 0.08% composite (was 0.10%) — catches more setups
-    if (absScore < 0.0008) {
+    // 0.05% composite threshold — catches signals in quieter markets
+    if (absScore < 0.0005) {
       return { side: null, delta: windowDelta, confidence: 0, trend15m, trend1h };
     }
 

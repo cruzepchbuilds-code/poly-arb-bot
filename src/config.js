@@ -17,7 +17,7 @@ export const CONFIG = {
   },
 
   combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.99,
-  momentumMinPct: 0.0005,
+  momentumMinPct: 0.0002,
 
   kellyFraction:    0.50,
   estimatedWinRate: 0.62,

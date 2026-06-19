@@ -43,12 +43,12 @@ const fmtPx = (p, asset) => {
 // Kraken REST pairs — polls all assets in one request every 2s
 const KRAKEN_PAIRS = {
   BTC: "XBTUSD", ETH: "ETHUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
-  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD",
+  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
 };
 // Kraken returns these keys in the result object
 const KRAKEN_RESULT_KEYS = {
   BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
-  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD",
+  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
 };
 
 function startPriceFeeds(assets) {
@@ -621,10 +621,14 @@ async function main() {
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
+      if (!lateEntry.getOpenPrice(market.id)) {
+        const px = feeds[market.asset]?.get() ?? null;
+        if (px) lateEntry.recordOpen(market.id, px);
+      }
       const binanceOpenPrice = lateEntry.getOpenPrice(market.id);
       if (!binanceOpenPrice) continue;
       const tokenId    = triggerSide === "UP" ? market.upTokenId : market.downTokenId;
-      const entryPrice = clobWs.getAsk(tokenId);
+      const entryPrice = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (entryPrice == null || entryPrice > 0.85) continue;
 
       enteringMarkets.add(market.id);
@@ -668,10 +672,14 @@ async function main() {
         if (!signal.side || signal.confidence < 0.10) continue;
         if (Math.abs(signal.delta) < CONFIG.momentumMinPct) continue;
 
+        if (!lateEntry.getOpenPrice(market.id)) {
+          const px = feeds[market.asset]?.get() ?? null;
+          if (px) lateEntry.recordOpen(market.id, px);
+        }
         const binanceOpenPrice = lateEntry.getOpenPrice(market.id);
         if (!binanceOpenPrice) continue;
         const tokenId    = signal.side === "UP" ? market.upTokenId : market.downTokenId;
-        const entryPrice = clobWs.getAsk(tokenId);
+        const entryPrice = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
         if (entryPrice == null || entryPrice > 0.85) continue;
 
         enteringMarkets.add(market.id);
