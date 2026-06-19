@@ -85,6 +85,15 @@ const HTML = `<!DOCTYPE html>
   .refresh-dot{width:7px;height:7px;background:#22c55e;border-radius:50%;display:inline-block;margin-right:5px;animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
   @media(max-width:600px){.header{padding:10px 14px}.main{padding:10px 14px}.balance{font-size:18px}}
+  .analytics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+  .insight{background:#0a1a00;border:1px solid #1a3a0022;border-radius:8px;padding:10px 14px;font-size:12px;color:#86efac}
+  .insight.warn{background:#1a0a00;border-color:#3a1a0022;color:#fbbf24}
+  .insight.bad{background:#1a0000;border-color:#3a000022;color:#f87171}
+  .mini-table{width:100%;border-collapse:collapse;font-size:12px}
+  .mini-table th{padding:5px 10px;text-align:left;color:#444;font-size:10px;font-weight:600;letter-spacing:.4px;border-bottom:1px solid #1a1a1a}
+  .mini-table td{padding:5px 10px;border-bottom:1px solid #111;color:#ccc}
+  .mini-table tr:last-child td{border:none}
+  .wr-bar{display:inline-block;height:6px;border-radius:3px;vertical-align:middle;margin-left:6px}
 </style>
 </head>
 <body>
@@ -117,6 +126,31 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div id="positions-body">
       <div class="empty">No active positions</div>
+    </div>
+  </div>
+
+  <div class="section" id="analytics-section" style="display:none">
+    <div class="section-header">Analytics & Insights <span style="color:#555;font-size:10px;font-weight:400;margin-left:8px" id="analytics-updated"></span></div>
+    <div style="padding:14px 16px;display:grid;gap:14px">
+      <div id="analytics-suggestions"></div>
+      <div class="analytics-grid">
+        <div>
+          <div style="font-size:10px;color:#555;font-weight:600;letter-spacing:.5px;margin-bottom:8px">BY STRATEGY</div>
+          <table class="mini-table" id="tbl-strategy"></table>
+        </div>
+        <div>
+          <div style="font-size:10px;color:#555;font-weight:600;letter-spacing:.5px;margin-bottom:8px">BY ASSET</div>
+          <table class="mini-table" id="tbl-asset"></table>
+        </div>
+        <div>
+          <div style="font-size:10px;color:#555;font-weight:600;letter-spacing:.5px;margin-bottom:8px">BY ENTRY PRICE</div>
+          <table class="mini-table" id="tbl-price"></table>
+        </div>
+        <div>
+          <div style="font-size:10px;color:#555;font-weight:600;letter-spacing:.5px;margin-bottom:8px">ADAPTIVE SIZING</div>
+          <table class="mini-table" id="tbl-adaptive"></table>
+        </div>
+      </div>
     </div>
   </div>
 

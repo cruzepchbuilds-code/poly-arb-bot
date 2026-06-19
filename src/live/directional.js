@@ -114,6 +114,9 @@ export class DirectionalPosition {
       resolved: this.resolved,
       expired: this.expired,
       remainingMs: this.remainingMs,
+      enteredAt: this.enteredAt,
+      enteredSecsLeft: this.enteredSecsLeft ?? null,
+      momentumPct: this.momentumPct ?? null,
       log: [...this.log],
     };
   }

@@ -17,6 +17,8 @@ import { FadeMomentum } from "./strategies/fadeMomentum.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
+import { analyzeTrades } from "./analytics/analyzer.js";
+import { AdaptiveSizer } from "./analytics/adaptive.js";
 
 const C = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
@@ -420,6 +422,8 @@ async function main() {
   const sniperStats = new SniperStats();
   const fadeStats   = new FadeStats();
   const fade        = new FadeMomentum();
+  const adaptive    = new AdaptiveSizer();
+  let _analytics    = null;
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
   let _seedWins = 0, _seedLosses = 0;
@@ -655,13 +659,15 @@ async function main() {
         enteringMarkets.add(market.id);
         (async () => {
           try {
-            const betSize = kellyBet(entryPrice, signal.confidence);
+            const betSize = kellyBet(entryPrice, signal.confidence) * adaptive.getMultiplier(market.asset, "LEM");
             if (betSize < CONFIG.minBetUsdc) return;
 
             const pos = new DirectionalPosition({
               id: market.id, asset: market.asset,
               side: signal.side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
             });
+            pos.enteredSecsLeft = Math.round((market.endMs - Date.now()) / 1000);
+            pos.momentumPct = getMomentum(market.asset);
             const entered = await pos.enter(entryPrice, betSize);
             if (entered) {
               simBalance -= pos.totalSpent ?? 0;
@@ -689,7 +695,7 @@ async function main() {
 
       const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
       const available = Math.max(0, simBalance - allocated);
-      const betSize   = Math.min(fade.calcBetSize(simBalance), available);
+      const betSize   = Math.min(fade.calcBetSize(simBalance), available) * adaptive.getMultiplier(market.asset, "FADE");
       if (betSize < 1) continue;
 
       fade.markFired(market.id);
@@ -702,6 +708,8 @@ async function main() {
             binanceOpenPrice: fade.getOpenPrice ? fade._openPrices.get(market.id)?.price : null,
             windowEndMs: market.endMs,
           });
+          pos.enteredSecsLeft = Math.round((market.endMs - Date.now()) / 1000);
+          pos.momentumPct = getMomentum(market.asset);
           pos.fade = true;
           const entered = await pos.enter(signal.tokenPrice, betSize);
           if (entered) {
@@ -731,7 +739,7 @@ async function main() {
 
       const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
       const available = Math.max(0, simBalance - allocated);
-      const betSize   = Math.min(sniper.calcBetSize(signal.tokenPrice, simBalance), available);
+      const betSize   = Math.min(sniper.calcBetSize(signal.tokenPrice, simBalance), available) * adaptive.getMultiplier(market.asset, "SNIPER");
       if (betSize < sniper.cfg.minBetUsdc) continue;
 
       sniper.markFired(market.id);
@@ -745,6 +753,8 @@ async function main() {
             binanceOpenPrice: sniper.getOpenPrice(market.id),
             windowEndMs: market.endMs,
           });
+          pos.enteredSecsLeft = Math.round((market.endMs - Date.now()) / 1000);
+          pos.momentumPct = getMomentum(market.asset);
           pos.sniper      = true;
           pos.sniperDelta = signal.delta;
           const entered = await pos.enter(signal.tokenPrice, betSize);
@@ -795,15 +805,18 @@ async function main() {
               logTrade({ ...s, strategy: "SNIPER" });
               sniperStats.record(s);
               sniper.recordResult(s.won);
+              if (s.won !== null) adaptive.record(pos.asset, "SNIPER", s.won);
               sniper.clearMarket(id);
             } else if (pos.fade) {
               logTrade({ ...s, strategy: "FADE" });
               fadeStats.record(s);
               fade.recordResult(s.won);
+              if (s.won !== null) adaptive.record(pos.asset, "FADE", s.won);
               fade.clearMarket(id);
             } else {
               logTrade({ ...s, strategy: "LEM" });
               lemStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "LEM", s.won);
               lateEntry.clearMarket(id);
             }
             clobWs.removeMarket(id);
@@ -866,6 +879,8 @@ async function main() {
     }),
     recentTrades: [...sniperStats.history, ...lemStats.history, ...stats.history]
       .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 15),
+    analytics: _analytics,
+    adaptive:  adaptive.getStats(),
     timestamp: Date.now(),
   }));
 
@@ -879,6 +894,10 @@ async function main() {
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }
+
+  const runAnalysis = () => { try { _analytics = analyzeTrades(); } catch { /* ignore */ } };
+  setInterval(runAnalysis, 5 * 60_000); // re-analyze every 5 min
+  runAnalysis(); // run once at startup
 
   setInterval(() => {
     render({
