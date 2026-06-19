@@ -15,6 +15,7 @@ import { LateEntrySignal } from "./strategies/lateEntry.js";
 import { ContrarianSniper } from "./strategies/contrarian.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
+import { startWebServer } from "./web/server.js";
 
 const C = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
@@ -777,6 +778,25 @@ async function main() {
       .filter(({ yesPrice, noPrice }) => yesPrice != null && noPrice != null && yesPrice + noPrice < t)
       .sort((a, b) => (a.yesPrice + a.noPrice) - (b.yesPrice + b.noPrice));
   };
+
+  startWebServer(() => ({
+    mode:        LIVE ? "LIVE" : "SIM",
+    balance:     LIVE ? usdcBalance : simBalance,
+    walletAddr,
+    wsConnected: clobWs.connected,
+    wsMarkets:   clobWs.marketCount,
+    assets:      CONFIG.assets,
+    prices:      Object.fromEntries(CONFIG.assets.map(a => [a, feeds[a]?.get() ?? null])),
+    momentums:   Object.fromEntries(CONFIG.assets.map(a => [a, getMomentum(a)])),
+    activePositions: [...activePositions.values()].map(p => p.summary),
+    arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills },
+    lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
+    sniper: { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
+    sweep:  { followed: sweepStats.followed },
+    recentTrades: [...sniperStats.history, ...lemStats.history, ...stats.history]
+      .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 15),
+    timestamp: Date.now(),
+  }));
 
   await refreshMarkets();
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
