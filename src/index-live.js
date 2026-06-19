@@ -3,6 +3,16 @@
  * Strategies: ARB | LEM | Cross-Asset | Sweep Follow
  */
 
+// Load .env file before anything else — allows overriding PM2 ecosystem defaults
+import { readFileSync, existsSync } from "fs";
+const envPath = new URL("../../.env", import.meta.url).pathname;
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/);
+    if (m) process.env[m[1]] = m[2].trim();
+  }
+}
+
 import WebSocket from "ws";
 import { CONFIG } from "./config.js";
 import { fetchAll5minMarkets, fetchClobMidPrices } from "./data/polymarket.js";
