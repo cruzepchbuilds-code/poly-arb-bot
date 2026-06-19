@@ -11,7 +11,6 @@ function safeTimeMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
-// Slug prefixes for each asset (try multiple in case Polymarket uses different names)
 const ASSET_PREFIXES = {
   BTC:  ["btc"],
   ETH:  ["eth"],
@@ -23,14 +22,78 @@ const ASSET_PREFIXES = {
   MATIC: ["matic", "pol"],
 };
 
+function detectAsset(text) {
+  const q = String(text || "").toLowerCase();
+  if (q.includes("bitcoin")   || q.includes("btc"))  return "BTC";
+  if (q.includes("ethereum")  || q.includes("eth"))  return "ETH";
+  if (q.includes("solana")    || q.includes("sol"))  return "SOL";
+  if (q.includes("ripple")    || q.includes("xrp"))  return "XRP";
+  if (q.includes("dogecoin")  || q.includes("doge")) return "DOGE";
+  if (q.includes("avalanche") || q.includes("avax")) return "AVAX";
+  if (q.includes("chainlink") || q.includes("link")) return "LINK";
+  if (q.includes("polygon")   || q.includes("matic"))return "MATIC";
+  return "GENERAL";
+}
+
+function getTokenIds(market) {
+  if (!market) return { upTokenId: null, downTokenId: null };
+
+  try {
+    let ids = market.clobTokenIds;
+    if (typeof ids === "string") ids = JSON.parse(ids);
+    if (Array.isArray(ids) && ids.length >= 2) {
+      return { upTokenId: String(ids[0]), downTokenId: String(ids[1]) };
+    }
+  } catch { /* ignore */ }
+
+  if (Array.isArray(market.tokens)) {
+    const up = market.tokens.find(t => /^(up|yes|higher|above)$/i.test(String(t.outcome || "")));
+    const dn = market.tokens.find(t => /^(down|no|lower|below)$/i.test(String(t.outcome || "")));
+    return {
+      upTokenId:   String(up?.token_id ?? up?.tokenId ?? "") || null,
+      downTokenId: String(dn?.token_id ?? dn?.tokenId ?? "") || null,
+    };
+  }
+
+  return { upTokenId: null, downTokenId: null };
+}
+
+function normalizeSlugMarket(m, asset, windowEndMs) {
+  if (!m) return null;
+  const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime) ?? windowEndMs;
+  if (!endMs || endMs <= Date.now()) return null;
+  const tokens = getTokenIds(m);
+  if (!tokens.upTokenId || !tokens.downTokenId) return null;
+
+  let initialYes = null, initialNo = null;
+  try {
+    const prices = JSON.parse(m.outcomePrices ?? "[]");
+    const p0 = Number(prices[0]), p1 = Number(prices[1]);
+    if (Number.isFinite(p0)) initialYes = p0;
+    if (Number.isFinite(p1)) initialNo  = p1;
+  } catch { /* ignore */ }
+
+  return {
+    id:          m.conditionId || m.id || tokens.upTokenId,
+    asset,
+    question:    String(m.question || m.title || `${asset} Up or Down 5m`),
+    windowMins:  5,
+    upTokenId:   tokens.upTokenId,
+    downTokenId: tokens.downTokenId,
+    endMs,
+    initialYes,
+    initialNo,
+  };
+}
+
+// ── 5-min crypto markets ────────────────────────────────────────────────────
+
 let _marketsCache = [];
 let _marketsCachedAt = 0;
 
 export async function fetchAll5minMarkets() {
   if (Date.now() - _marketsCachedAt < 15_000) return _marketsCache;
 
-  // 5-min windows use Unix timestamps in seconds, always on 300s boundaries.
-  // Slug format: {asset}-updown-5m-{windowEndSeconds}
   const nowSec = Math.floor(Date.now() / 1000);
   const currentEnd = Math.ceil(nowSec / 300) * 300 || (Math.floor(nowSec / 300) + 1) * 300;
   const windows = [currentEnd, currentEnd + 300, currentEnd + 600];
@@ -39,8 +102,7 @@ export async function fetchAll5minMarkets() {
   for (const [asset, prefixes] of Object.entries(ASSET_PREFIXES)) {
     for (const prefix of prefixes) {
       for (const windowEnd of windows) {
-        const slug = `${prefix}-updown-5m-${windowEnd}`;
-        fetches.push({ asset, slug, windowEndMs: windowEnd * 1000 });
+        fetches.push({ asset, slug: `${prefix}-updown-5m-${windowEnd}`, windowEndMs: windowEnd * 1000 });
       }
     }
   }
@@ -59,17 +121,10 @@ export async function fetchAll5minMarkets() {
   );
 
   const all = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
-
   const seen = new Set();
-  const unique = all.filter(m => {
-    if (seen.has(m.id)) return false;
-    seen.add(m.id);
-    return true;
-  });
-
-  _marketsCache = unique;
+  _marketsCache = all.filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; });
   _marketsCachedAt = Date.now();
-  return unique;
+  return _marketsCache;
 }
 
 async function fetchEventBySlug(slug) {
@@ -86,81 +141,74 @@ async function fetchEventBySlug(slug) {
   } catch { return []; }
 }
 
-function normalizeSlugMarket(m, asset, windowEndMs) {
-  if (!m) return null;
+// ── Broader ARB candidate scan ───────────────────────────────────────────────
+// Fetches all active binary markets and pre-screens for combined price < 0.97.
+// Results are subscribed to the CLOB WS so the ARB trigger fires automatically.
 
-  const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime) ?? windowEndMs;
-  if (!endMs || endMs <= Date.now()) return null;
+let _arbCache = [];
+let _arbCachedAt = 0;
 
-  const tokens = getTokenIds(m);
-  if (!tokens.upTokenId || !tokens.downTokenId) return null;
+export async function fetchArbCandidates() {
+  if (Date.now() - _arbCachedAt < 120_000) return _arbCache;
 
-  const question = String(m.question || m.title || `${asset} Up or Down 5m`);
+  const now = Date.now();
+  const results = [];
 
-  let initialYes = null, initialNo = null;
   try {
-    const prices = JSON.parse(m.outcomePrices ?? "[]");
-    const p0 = Number(prices[0]), p1 = Number(prices[1]);
-    if (Number.isFinite(p0)) initialYes = p0;
-    if (Number.isFinite(p1)) initialNo  = p1;
-  } catch { /* ignore */ }
+    const res = await fetch(
+      `${CONFIG.gammaBaseUrl}/markets?active=true&closed=false&limit=200`,
+      { signal: AbortSignal.timeout(10_000) }
+    );
+    if (!res.ok) return _arbCache;
+    const data = await res.json();
+    const markets = Array.isArray(data) ? data : (data.markets ?? []);
 
-  return {
-    id: m.conditionId || m.id || tokens.upTokenId,
-    asset,
-    question,
-    windowMins: 5,
-    upTokenId:   tokens.upTokenId,
-    downTokenId: tokens.downTokenId,
-    endMs,
-    initialYes,
-    initialNo,
-  };
+    for (const m of markets) {
+      const tokens = getTokenIds(m);
+      if (!tokens.upTokenId || !tokens.downTokenId) continue;
+
+      const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
+      if (!endMs || endMs <= now + 60_000) continue;
+
+      let initialYes = null, initialNo = null;
+      try {
+        const prices = JSON.parse(m.outcomePrices ?? "[]");
+        const p0 = Number(prices[0]), p1 = Number(prices[1]);
+        if (Number.isFinite(p0)) initialYes = p0;
+        if (Number.isFinite(p1)) initialNo  = p1;
+      } catch { /* ignore */ }
+
+      // Skip if REST prices already show combined is not discounted
+      if (initialYes !== null && initialNo !== null && initialYes + initialNo >= 0.97) continue;
+
+      results.push({
+        id:          m.conditionId || m.id || tokens.upTokenId,
+        asset:       detectAsset(m.question || m.title),
+        question:    String(m.question || m.title || "Unknown").slice(0, 80),
+        windowMins:  Math.max(1, Math.round((endMs - now) / 60_000)),
+        upTokenId:   tokens.upTokenId,
+        downTokenId: tokens.downTokenId,
+        endMs,
+        initialYes,
+        initialNo,
+      });
+    }
+  } catch { /* network error — return cached */ }
+
+  _arbCache = results;
+  _arbCachedAt = Date.now();
+  return results;
 }
+
+// ── Utility exports ──────────────────────────────────────────────────────────
 
 export async function fetchMarketById(conditionId) {
   try {
     const res = await fetch(`${CONFIG.gammaBaseUrl}/markets/${conditionId}`, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
     const m = await res.json();
-    // Try to detect asset from question
-    const q = String(m.question || m.title || "").toLowerCase();
-    const asset =
-      q.includes("bitcoin") || q.includes("btc")  ? "BTC"  :
-      q.includes("ethereum") || q.includes("eth") ? "ETH"  :
-      q.includes("solana") || q.includes("sol")   ? "SOL"  :
-      q.includes("ripple") || q.includes("xrp")   ? "XRP"  :
-      q.includes("dogecoin") || q.includes("doge")? "DOGE" :
-      q.includes("avalanche") || q.includes("avax")? "AVAX":
-      q.includes("chainlink") || q.includes("link")? "LINK":
-      q.includes("polygon") || q.includes("matic")? "MATIC": "BTC";
-    return normalizeSlugMarket(m, asset, null);
+    return normalizeSlugMarket(m, detectAsset(m.question || m.title), null);
   } catch { return null; }
-}
-
-function getTokenIds(market) {
-  if (!market) return { upTokenId: null, downTokenId: null };
-
-  // clobTokenIds may be a JSON-encoded string: "[\"id1\",\"id2\"]"
-  try {
-    let ids = market.clobTokenIds;
-    if (typeof ids === "string") ids = JSON.parse(ids);
-    if (Array.isArray(ids) && ids.length >= 2) {
-      return { upTokenId: String(ids[0]), downTokenId: String(ids[1]) };
-    }
-  } catch { /* ignore */ }
-
-  // Fallback: tokens array
-  if (Array.isArray(market.tokens)) {
-    const up = market.tokens.find(t => /^(up|yes|higher|above)$/i.test(String(t.outcome || "")));
-    const dn = market.tokens.find(t => /^(down|no|lower|below)$/i.test(String(t.outcome || "")));
-    return {
-      upTokenId:   String(up?.token_id   ?? up?.tokenId   ?? "") || null,
-      downTokenId: String(dn?.token_id   ?? dn?.tokenId   ?? "") || null,
-    };
-  }
-
-  return { upTokenId: null, downTokenId: null };
 }
 
 async function fetchMidPrice(tokenId) {

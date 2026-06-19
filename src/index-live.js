@@ -5,7 +5,7 @@
 
 import WebSocket from "ws";
 import { CONFIG } from "./config.js";
-import { fetchAll5minMarkets, fetchClobMidPrices } from "./data/polymarket.js";
+import { fetchAll5minMarkets, fetchArbCandidates, fetchClobMidPrices } from "./data/polymarket.js";
 import { ClobWsFeed } from "./data/clobWs.js";
 import { logTrade, loadTrades } from "./data/logger.js";
 import { loadSimState, saveSimState } from "./data/simState.js";
@@ -466,6 +466,7 @@ async function main() {
     if (pnlHistory.length > 1000) pnlHistory.splice(0, pnlHistory.length - 1000);
   };
   let marketList          = [];
+  let arbMarketList       = []; // broader binary markets for ARB-only scanning
   let isMonitoring        = false;
   let isFallbackScanning  = false;
   let isLateEntryChecking = false;
@@ -498,7 +499,7 @@ async function main() {
   clobWs.onOpportunity((marketId, yesPrice, noPrice) => {
     if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return;
     if (activePositions.size >= CONFIG.maxPositions) return;
-    const market = marketList.find((m) => m.id === marketId);
+    const market = marketList.find((m) => m.id === marketId) ?? arbMarketList.find((m) => m.id === marketId);
     if (!market || market.endMs - Date.now() < 60_000) return;
 
     enteringMarkets.add(marketId);
@@ -562,6 +563,19 @@ async function main() {
     }
     clobWs.addMarkets(markets);
     marketList = markets;
+
+    // Broader ARB scan — subscribe any binary market with a pricing gap
+    try {
+      const arbCandidates = await fetchArbCandidates();
+      const now = Date.now();
+      const existingIds = new Set(marketList.map(m => m.id));
+      const fresh = arbCandidates.filter(m => !existingIds.has(m.id));
+      clobWs.addMarkets(fresh);
+      // Merge in, drop expired, deduplicate
+      const combined = [...arbMarketList, ...fresh];
+      const seen = new Set();
+      arbMarketList = combined.filter(m => m.endMs > now && !seen.has(m.id) && seen.add(m.id));
+    } catch { /* ignore */ }
   };
 
   const fallbackScan = async () => {
@@ -569,7 +583,7 @@ async function main() {
     isFallbackScanning = true;
     try {
       const t = getThreshold();
-      for (const market of marketList) {
+      for (const market of [...marketList, ...arbMarketList]) {
         if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
         if (activePositions.size >= CONFIG.maxPositions) break;
         const upAge   = clobWs.getAgeMs(market.upTokenId);
