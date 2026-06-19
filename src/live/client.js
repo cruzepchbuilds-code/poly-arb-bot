@@ -1,5 +1,7 @@
 import { ClobClient, Chain, SignatureType } from "@polymarket/clob-client";
-import { ethers } from "ethers";
+import { createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
 
 let _client = null;
 
@@ -10,7 +12,12 @@ export function getClient() {
   if (!rawKey) throw new Error("PRIVATE_KEY not set in environment");
 
   const privateKey = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
-  const wallet = new ethers.Wallet(privateKey);
+  const account = privateKeyToAccount(privateKey);
+  const walletClient = createWalletClient({
+    account,
+    chain: polygon,
+    transport: http(),
+  });
 
   const creds =
     process.env.POLY_API_KEY
@@ -27,7 +34,7 @@ export function getClient() {
   _client = new ClobClient(
     "https://clob.polymarket.com",
     Chain.POLYGON,
-    wallet,
+    walletClient,
     creds,
     sigType,
     proxy
@@ -39,5 +46,5 @@ export function getClient() {
 export function walletAddress() {
   const rawKey = process.env.PRIVATE_KEY || "";
   const key = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
-  return new ethers.Wallet(key).address;
+  return privateKeyToAccount(key).address;
 }

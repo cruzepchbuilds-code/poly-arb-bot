@@ -11,7 +11,9 @@
  */
 
 import { ClobClient, Chain, SignatureType } from "@polymarket/clob-client";
-import { ethers } from "ethers";
+import { createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { polygon } from "viem/chains";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 
 function loadEnv(path = ".env") {
@@ -56,8 +58,13 @@ async function main() {
   }
 
   const privateKey = rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`;
-  const wallet = new ethers.Wallet(privateKey);
-  console.log(`Wallet address: ${wallet.address}`);
+  const account = privateKeyToAccount(privateKey);
+  const walletClient = createWalletClient({
+    account,
+    chain: polygon,
+    transport: http(),
+  });
+  console.log(`Wallet address: ${account.address}`);
 
   const proxy = env.POLY_PROXY_ADDRESS || undefined;
   const sigType = proxy ? SignatureType.POLY_PROXY : SignatureType.EOA;
@@ -65,8 +72,8 @@ async function main() {
   const client = new ClobClient(
     "https://clob.polymarket.com",
     Chain.POLYGON,
-    wallet,
-    undefined,  // no creds yet
+    walletClient,
+    undefined,
     sigType,
     proxy
   );
