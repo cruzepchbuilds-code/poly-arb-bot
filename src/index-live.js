@@ -476,7 +476,7 @@ async function main() {
   const kellySizeBet = (combined) => {
     const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
     const available = Math.max(0, simBalance - allocated);
-    const kelly     = available * ((1 - combined) / combined) * 0.5;
+    const kelly     = available * ((1 - combined) / combined) * 1.5;
     return Math.max(1, Math.min(kelly, available * 0.35));
   };
 
@@ -672,7 +672,7 @@ async function main() {
         const wm        = market.windowMins ?? 5;
         if (wm > 15) continue; // LEM only meaningful on short windows
         const remaining = market.endMs - now;
-        if (remaining < wm * 3_000 || remaining > wm * 36_000) continue;
+        if (remaining < wm * 48_000 || remaining > wm * 59_000) continue;
         if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
         if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -683,7 +683,7 @@ async function main() {
         const signal = lateEntry.getSignal(
           market.id, currentPrice, priceSnaps[market.asset] ?? [], market.asset, volPressure
         );
-        if (!signal.side || signal.confidence < 0.10) continue;
+        if (!signal.side || signal.confidence < 0.35) continue;
         if (Math.abs(signal.delta) < CONFIG.momentumMinPct) continue;
 
         if (!lateEntry.getOpenPrice(market.id)) {
@@ -722,7 +722,8 @@ async function main() {
   };
 
   const fadeCheck = () => {
-    for (const market of marketList) {
+    return; // disabled — no Binance directional confirmation, random entries
+    for (const market of marketList) { // eslint-disable-line no-unreachable
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
