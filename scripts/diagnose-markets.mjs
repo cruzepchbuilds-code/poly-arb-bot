@@ -16,92 +16,85 @@ function safeTimeMs(v) {
 }
 
 async function main() {
-  console.log("=== GAMMA API DIAGNOSTIC ===\n");
+  console.log("=== GAMMA API DIAGNOSTIC v2 ===\n");
 
-  // Test 1: Direct search for BTC 5-min markets
-  console.log("--- Searching markets?active=true&limit=500 ---");
-  const data = await fetchJson(`${GAMMA}/markets?active=true&limit=500`);
-  if (!data) { console.log("FAILED to fetch markets"); }
-  else {
-    const markets = Array.isArray(data) ? data : (data.markets ?? []);
-    console.log(`Total returned: ${markets.length}`);
-
-    const updown = markets.filter(m => {
-      const q = String(m.question || m.title || "").toLowerCase();
-      return (q.includes("up or down") || q.includes("5m") || q.includes("5 min") || q.includes("5-min"));
-    });
-    console.log(`Up/down or 5-min matches: ${updown.length}`);
-    for (const m of updown.slice(0, 5)) {
-      console.log("\nMARKET:", m.question || m.title);
-      console.log("  conditionId:", m.conditionId);
-      console.log("  endDate:", m.endDate, "→", safeTimeMs(m.endDate), "now:", Date.now());
-      console.log("  active:", m.active, "closed:", m.closed);
-      console.log("  clobTokenIds:", JSON.stringify(m.clobTokenIds));
-      console.log("  tokens:", JSON.stringify(m.tokens?.map(t => ({ outcome: t.outcome, token_id: t.token_id?.slice(0,10)+"..." }))));
-      console.log("  outcomePrices:", m.outcomePrices);
-    }
+  // Show what the 100 markets actually ARE
+  console.log("--- What are the 100 markets? (first 10 questions) ---");
+  const d100 = await fetchJson(`${GAMMA}/markets?active=true&limit=100`);
+  const m100 = Array.isArray(d100) ? d100 : (d100?.markets ?? []);
+  for (const m of m100.slice(0, 10)) {
+    const end = safeTimeMs(m.endDate);
+    const mins = end ? Math.round((end - Date.now()) / 60000) : null;
+    console.log(` "${m.question?.slice(0, 70)}" ends in ${mins}m`);
   }
 
-  // Test 2: Events endpoint
-  console.log("\n--- Searching events?active=true&limit=100 ---");
-  const evData = await fetchJson(`${GAMMA}/events?active=true&limit=100`);
-  if (!evData) { console.log("FAILED to fetch events"); }
-  else {
-    const events = Array.isArray(evData) ? evData : (evData.events ?? []);
-    console.log(`Total events: ${events.length}`);
-    const fiveMin = events.filter(e => {
-      const q = String(e.title || e.slug || "").toLowerCase();
-      return q.includes("5") && (q.includes("btc") || q.includes("bitcoin") || q.includes("crypto"));
-    });
-    console.log(`5-min crypto events: ${fiveMin.length}`);
-    for (const e of fiveMin.slice(0, 3)) {
-      console.log("\nEVENT:", e.title || e.slug);
-      console.log("  id:", e.id);
-      console.log("  markets count:", e.markets?.length);
-      if (e.markets?.[0]) {
-        const m = e.markets[0];
-        console.log("  first market clobTokenIds:", JSON.stringify(m.clobTokenIds));
-        console.log("  first market tokens:", JSON.stringify(m.tokens?.map(t => ({ outcome: t.outcome, token_id: t.token_id?.slice?.(0,10)+"..." }))));
-        console.log("  first market endDate:", m.endDate);
-        console.log("  first market active:", m.active);
+  // Test pagination with offset
+  console.log("\n--- Paginating: offset 0, 100, 200, 300, 400 ---");
+  for (const offset of [0, 100, 200, 300, 400]) {
+    const data = await fetchJson(`${GAMMA}/markets?active=true&limit=100&offset=${offset}`);
+    const ms = Array.isArray(data) ? data : (data?.markets ?? []);
+    const ud = ms.filter(m => String(m.question || "").toLowerCase().includes("up or down"));
+    console.log(`  offset=${offset}: ${ms.length} markets, ${ud.length} up/down`);
+    if (ud.length > 0) {
+      for (const m of ud.slice(0, 3)) {
+        console.log(`    FOUND: "${m.question?.slice(0,60)}" endDate=${m.endDate}`);
+        console.log(`    clobTokenIds: ${JSON.stringify(m.clobTokenIds)}`);
       }
     }
+    if (ms.length < 100) { console.log("  (reached end of results)"); break; }
   }
 
-  // Test 3: Direct slug lookup
-  console.log("\n--- Trying known slugs ---");
-  const slugs = ["btc-up-or-down-5m", "btc-up-or-down-in-5-minutes", "bitcoin-up-or-down-5-min"];
-  for (const slug of slugs) {
-    const d = await fetchJson(`${GAMMA}/events?slug=${slug}`);
-    if (d && (Array.isArray(d) ? d.length : d.events?.length)) {
-      console.log(`FOUND via slug: ${slug}`);
-      const events = Array.isArray(d) ? d : (d.events ?? []);
-      const e = events[0];
-      console.log("  markets:", e.markets?.length);
+  // Try text search
+  console.log("\n--- Text search: ?question=up+or+down ---");
+  const searchData = await fetchJson(`${GAMMA}/markets?active=true&limit=100&question=up+or+down`);
+  const searchMs = Array.isArray(searchData) ? searchData : (searchData?.markets ?? []);
+  console.log(`Results: ${searchMs.length}`);
+  for (const m of searchMs.slice(0, 5)) {
+    console.log(` "${m.question?.slice(0,70)}" clobTokenIds: ${!!m.clobTokenIds}`);
+  }
+
+  // Try fetching events with pagination
+  console.log("\n--- Events pagination ---");
+  for (const offset of [0, 100]) {
+    const data = await fetchJson(`${GAMMA}/events?active=true&limit=100&offset=${offset}`);
+    const evs = Array.isArray(data) ? data : (data?.events ?? []);
+    console.log(`  offset=${offset}: ${evs.length} events`);
+    const crypto5 = evs.filter(e => {
+      const t = String(e.title || e.slug || "").toLowerCase();
+      return (t.includes("btc") || t.includes("bitcoin") || t.includes("crypto") || t.includes("eth")) &&
+             (t.includes("5") || t.includes("up") || t.includes("down"));
+    });
+    console.log(`  crypto 5-min events: ${crypto5.length}`);
+    for (const e of crypto5.slice(0, 5)) {
+      console.log(`  EVENT: "${e.title || e.slug}"`);
+      console.log(`    markets: ${e.markets?.length}`);
       const m = e.markets?.[0];
       if (m) {
-        console.log("  clobTokenIds:", JSON.stringify(m.clobTokenIds));
-        console.log("  endDate:", m.endDate);
+        console.log(`    first market: "${m.question}" endDate=${m.endDate}`);
+        console.log(`    clobTokenIds: ${JSON.stringify(m.clobTokenIds)}`);
       }
-    } else {
-      console.log(`Not found: ${slug}`);
     }
   }
 
-  // Test 4: Search by tag
-  console.log("\n--- Tag slug: crypto ---");
-  const tagData = await fetchJson(`${GAMMA}/markets?active=true&limit=200&tag_slug=crypto`);
-  if (tagData) {
-    const ms = Array.isArray(tagData) ? tagData : (tagData.markets ?? []);
-    console.log(`crypto tag returns: ${ms.length} markets`);
-    const ud = ms.filter(m => String(m.question || "").toLowerCase().includes("up or down"));
-    console.log(`up or down: ${ud.length}`);
-    for (const m of ud.slice(0, 3)) {
-      console.log("\n ", m.question);
-      console.log("  endDate:", m.endDate, "expired:", safeTimeMs(m.endDate) < Date.now());
-      console.log("  clobTokenIds:", JSON.stringify(m.clobTokenIds?.slice(0,2)));
-    }
+  // Try CLOB API for token lookup
+  console.log("\n--- CLOB API: /markets endpoint ---");
+  const clobData = await fetchJson("https://clob.polymarket.com/markets?limit=50&active=true");
+  const clobMs = Array.isArray(clobData) ? clobData : (clobData?.data ?? []);
+  console.log(`CLOB markets returned: ${clobMs.length}`);
+  const clobUD = clobMs.filter(m => {
+    const q = String(m.question || m.description || "").toLowerCase();
+    return q.includes("up or down") || (q.includes("btc") && q.includes("5"));
+  });
+  console.log(`CLOB up/down or btc-5: ${clobUD.length}`);
+  for (const m of clobUD.slice(0, 3)) {
+    console.log(` "${m.question?.slice(0,60)}"`);
+    console.log(`  tokens: ${JSON.stringify(m.tokens?.map(t => t.token_id?.slice(0,10)))}`);
   }
+
+  // Try the strapi / data API
+  console.log("\n--- Strapi API ---");
+  const strapiData = await fetchJson("https://strapi-matic.poly.market/markets?is_active=true&_limit=50&category=Crypto&market_type=yesno");
+  console.log(`Strapi result: ${JSON.stringify(strapiData)?.slice(0,200)}`);
 
   console.log("\n=== DONE ===");
 }
