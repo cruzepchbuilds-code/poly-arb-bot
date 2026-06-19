@@ -4,13 +4,12 @@ module.exports = {
       name: "poly-arb-sim",
       script: "src/index-live.js",
       interpreter: "node",
-      interpreter_args: "--experimental-vm-modules",
       cwd: "/root/poly-arb-bot",
 
       // Run in SIM mode by default (no real trades)
       env: {
         NODE_ENV: "production",
-        SIM_MODE: "true",
+        LIVE_MODE: "false",
         MAX_TRADE_USDC: "20",
         COMBINED_THRESHOLD: "0.95",
       },
