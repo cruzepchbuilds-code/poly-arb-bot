@@ -77,16 +77,18 @@ function isCryptoUpDownMarket(m) {
   const q = String(m.question || m.title || m.slug || "").toLowerCase();
 
   const isCrypto =
-    q.includes("bitcoin")   || q.includes(" btc")  ||
-    q.includes("ethereum")  || q.includes(" eth")  ||
-    q.includes("solana")    || q.includes(" sol")  ||
-    q.includes("ripple")    || q.includes(" xrp")  ||
-    q.includes("dogecoin")  || q.includes(" doge") ||
-    q.includes("avalanche") || q.includes(" avax") ||
-    q.includes("chainlink") || q.includes(" link") ||
-    q.includes("polygon")   || q.includes(" matic");
+    q.includes("bitcoin")   || /\bbtc\b/.test(q)  ||
+    q.includes("ethereum")  || /\beth\b/.test(q)  ||
+    q.includes("solana")    || /\bsol\b/.test(q)  ||
+    q.includes("ripple")    || /\bxrp\b/.test(q)  ||
+    q.includes("dogecoin")  || /\bdoge\b/.test(q) ||
+    q.includes("avalanche") || /\bavax\b/.test(q) ||
+    q.includes("chainlink") || /\blink\b/.test(q) ||
+    q.includes("polygon")   || /\bmatic\b/.test(q);
 
-  const isUpDown = q.includes("up or down") || q.includes("higher") || q.includes("above");
+  const isUpDown =
+    q.includes("up or down") || q.includes("higher") || q.includes("above") ||
+    q.includes("lower or higher") || q.includes("go up") || q.includes("price up");
 
   const start    = safeTimeMs(m.startDate || m.startTime);
   const end      = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);

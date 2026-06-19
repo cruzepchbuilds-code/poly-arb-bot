@@ -35,39 +35,44 @@ const fmtPx = (p, asset) => {
   return `$${p.toFixed(4)}`;
 };
 
-function startPriceFeed(symbol) {
-  const url = `wss://stream.binance.com:9443/ws/${symbol.toLowerCase()}@trade`;
-  let price = null; let ws = null; let closed = false; let delay = 500;
+// Kraken symbols — no geo-restrictions unlike Binance
+const KRAKEN_SYMBOLS = {
+  BTC: "BTC/USD", ETH: "ETH/USD", SOL: "SOL/USD", XRP: "XRP/USD",
+  DOGE: "DOGE/USD", AVAX: "AVAX/USD", LINK: "LINK/USD", MATIC: "MATIC/USD",
+};
 
-  const volBuckets = [];
-  let curBkt = { buyV: 0, sellV: 0, ts: Math.floor(Date.now() / 1000) * 1000 };
+function startPriceFeeds(assets) {
+  const prices    = {};
+  const symToAsset = {};
+  for (const a of assets) { if (KRAKEN_SYMBOLS[a]) symToAsset[KRAKEN_SYMBOLS[a]] = a; }
+  const symbols = Object.values(KRAKEN_SYMBOLS).filter((_, i) => assets.includes(Object.keys(KRAKEN_SYMBOLS)[i]));
+
+  let ws = null, closed = false, delay = 500;
 
   const connect = () => {
     if (closed) return;
-    ws = new WebSocket(url);
-    ws.on("open", () => { delay = 500; });
+    ws = new WebSocket("wss://ws.kraken.com/v2");
+    ws.on("open", () => {
+      delay = 500;
+      ws.send(JSON.stringify({ method: "subscribe", params: { channel: "ticker", symbol: symbols } }));
+    });
     ws.on("message", (buf) => {
       try {
-        const t = JSON.parse(buf.toString());
-        const p = Number(t.p);
-        if (Number.isFinite(p)) price = p;
-        const qty = Number(t.q);
-        if (Number.isFinite(qty)) {
-          const bts = Math.floor(Date.now() / 1000) * 1000;
-          if (bts !== curBkt.ts) {
-            volBuckets.push(curBkt);
-            if (volBuckets.length > 120) volBuckets.shift();
-            curBkt = { buyV: 0, sellV: 0, ts: bts };
+        const msg = JSON.parse(buf.toString());
+        if (msg.channel === "ticker" && Array.isArray(msg.data)) {
+          for (const d of msg.data) {
+            const asset = symToAsset[d.symbol];
+            if (!asset) continue;
+            const p = Number(d.last);
+            if (Number.isFinite(p) && p > 0) prices[asset] = p;
           }
-          if (!t.m) curBkt.buyV  += qty;
-          else      curBkt.sellV += qty;
         }
       } catch { /* ignore */ }
     });
     const retry = () => {
       if (closed) return;
       try { ws?.terminate(); } catch { /* ignore */ }
-      const w = delay; delay = Math.min(10_000, Math.floor(delay * 1.5));
+      const w = delay; delay = Math.min(30_000, Math.floor(delay * 1.5));
       setTimeout(connect, w);
     };
     ws.on("close", retry);
@@ -75,19 +80,12 @@ function startPriceFeed(symbol) {
   };
   connect();
 
-  return {
-    get: () => price,
-    getVolPressure: (windowMs = 60_000) => {
-      const cutoff = Date.now() - windowMs;
-      const recent = [...volBuckets, curBkt].filter(b => b.ts >= cutoff);
-      if (!recent.length) return 0.5;
-      const buyV  = recent.reduce((s, b) => s + b.buyV,  0);
-      const sellV = recent.reduce((s, b) => s + b.sellV, 0);
-      const total = buyV + sellV;
-      return total > 0 ? buyV / total : 0.5;
-    },
-    close: () => { closed = true; try { ws?.close(); } catch { /* ignore */ } },
-  };
+  // Return per-asset feed objects matching existing interface
+  return Object.fromEntries(assets.map(a => [a, {
+    get:           () => prices[a] ?? null,
+    getVolPressure: () => 0.5, // neutral — Kraken ticker doesn't split buy/sell volume
+    close:         () => { closed = true; try { ws?.close(); } catch { /* ignore */ } },
+  }]));
 }
 
 class Stats {
@@ -323,10 +321,7 @@ async function main() {
     try { const { walletAddress } = await import("./live/client.js"); walletAddr = walletAddress(); } catch { /* ignore */ }
   }
 
-  const feeds = {};
-  for (const [asset, symbol] of Object.entries(CONFIG.binanceSymbols)) {
-    feeds[asset] = startPriceFeed(symbol);
-  }
+  const feeds = startPriceFeeds(CONFIG.assets);
 
   const priceSnaps = Object.fromEntries(CONFIG.assets.map((a) => [a, []]));
   const lateEntry  = new LateEntrySignal();
