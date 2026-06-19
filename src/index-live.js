@@ -688,9 +688,8 @@ async function main() {
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
-      const currentPrice = feeds[market.asset]?.get() ?? null;
       const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
-      const signal = fade.getSignal(market, yesPrice, noPrice, currentPrice);
+      const signal = fade.getSignal(market, yesPrice, noPrice);
       if (!signal.side) continue;
 
       const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);

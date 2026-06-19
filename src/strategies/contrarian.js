@@ -3,15 +3,15 @@
 // Edge: market underprices mean-reversion probability after violent BTC moves
 
 const DEFAULTS = {
-  maxTokenPrice:    0.12,   // only buy when token is 12 cents or less
-  minPriceMovePct:  0.0025, // asset must have moved 0.25% from market open
+  maxTokenPrice:    0.15,   // buy when token is 15 cents or less
+  minPriceMovePct:  0.0020, // asset must have moved 0.20% from market open
   minTimeMs:        30_000, // at least 30s remaining at entry
   maxTimeMs:        180_000,// enter only in final 3 minutes
   kellyFraction:    0.25,   // 25% fractional Kelly — conservative until edge confirmed
   minBetUsdc:       5,      // never bet less than $5
   maxBetPct:        0.04,   // never more than 4% of bankroll per snipe
   maxBetUsdc:       500,    // hard cap — Polymarket liquidity limit
-  baseWinRate:      0.095,  // 0xa689 baseline until we have our own data
+  baseWinRate:      0.15,   // raised from 9.5% — allows edge on tokens up to 14.9¢
   minTradesForLive: 20,     // switch to observed win rate after this many trades
 };
 

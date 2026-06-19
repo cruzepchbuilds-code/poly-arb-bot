@@ -1,11 +1,12 @@
-// Fade Momentum — buys the cheap side at 20-45¢ after a moderate BTC move.
+// Fade Momentum — buys the clearly discounted side (20-45¢) with time remaining.
 // Similar to contrarian sniper but targets mid-range tokens, not extreme moves.
 // Based on observed trader behavior: buy DOWN at 30-35¢ when BTC has been rising.
+// Signal: the token being cheap already encodes the directional move — no separate
+// asset-price confirmation needed (that was blocking signals in calm markets).
 
 const DEFAULTS = {
   minTokenPrice:   0.20,   // token must be at least 20¢ (avoids overlap with sniper)
-  maxTokenPrice:   0.48,   // token at most 48¢
-  minPriceMovePct: 0.001,  // asset must have moved 0.1% from window open
+  maxTokenPrice:   0.45,   // token at most 45¢ — clearly discounted from 50/50
   minTimeMs:       60_000, // at least 60s remaining
   maxTimeMs:       300_000,// enter only in final 5 minutes
   betUsdc:         5,      // flat $5 per trade while testing
@@ -36,29 +37,28 @@ export class FadeMomentum {
   }
 
   // Returns { side, tokenId, tokenPrice, delta } or { side: null }
-  // BTC rose  → Down token cheap-ish → buy Down (bet on fade)
-  // BTC fell  → Up token cheap-ish   → buy Up   (bet on fade)
-  getSignal(market, upTokenPrice, downTokenPrice, currentPrice) {
-    const { minTokenPrice, maxTokenPrice, minPriceMovePct, minTimeMs, maxTimeMs } = this.cfg;
+  // Buys whichever side is clearly discounted (20-45¢) — the cheap token
+  // already encodes the directional move; no separate asset confirmation needed.
+  getSignal(market, upTokenPrice, downTokenPrice) {
+    const { minTokenPrice, maxTokenPrice, minTimeMs, maxTimeMs } = this.cfg;
 
     if (this._fired.has(market.id)) return { side: null };
 
     const remaining = market.endMs - Date.now();
     if (remaining < minTimeMs || remaining > maxTimeMs) return { side: null };
 
-    const open = this._openPrices.get(market.id);
-    if (!open || currentPrice == null) return { side: null };
+    // Skip if combined is so low it's already an ARB situation
+    if (upTokenPrice != null && downTokenPrice != null &&
+        upTokenPrice + downTokenPrice < 0.80) return { side: null };
 
-    const delta = (currentPrice - open.price) / open.price;
-
-    if (delta >= minPriceMovePct && downTokenPrice != null &&
+    if (downTokenPrice != null &&
         downTokenPrice >= minTokenPrice && downTokenPrice <= maxTokenPrice) {
-      return { side: "DOWN", tokenId: market.downTokenId, tokenPrice: downTokenPrice, delta };
+      return { side: "DOWN", tokenId: market.downTokenId, tokenPrice: downTokenPrice, delta: 0 };
     }
 
-    if (delta <= -minPriceMovePct && upTokenPrice != null &&
+    if (upTokenPrice != null &&
         upTokenPrice >= minTokenPrice && upTokenPrice <= maxTokenPrice) {
-      return { side: "UP", tokenId: market.upTokenId, tokenPrice: upTokenPrice, delta };
+      return { side: "UP", tokenId: market.upTokenId, tokenPrice: upTokenPrice, delta: 0 };
     }
 
     return { side: null };
