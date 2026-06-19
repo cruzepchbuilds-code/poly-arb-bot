@@ -11,125 +11,91 @@ function safeTimeMs(v) {
   return Number.isFinite(t) ? t : null;
 }
 
+// Slug prefixes for each asset (try multiple in case Polymarket uses different names)
+const ASSET_PREFIXES = {
+  BTC:  ["btc"],
+  ETH:  ["eth"],
+  SOL:  ["sol"],
+  XRP:  ["xrp"],
+  DOGE: ["doge"],
+  AVAX: ["avax"],
+  LINK: ["link"],
+  MATIC: ["matic", "pol"],
+};
+
 let _marketsCache = [];
 let _marketsCachedAt = 0;
 
 export async function fetchAll5minMarkets() {
-  if (Date.now() - _marketsCachedAt < 30_000) return _marketsCache;
+  if (Date.now() - _marketsCachedAt < 15_000) return _marketsCache;
 
-  const results = [];
+  // 5-min windows use Unix timestamps in seconds, always on 300s boundaries.
+  // Slug format: {asset}-updown-5m-{windowEndSeconds}
+  const nowSec = Math.floor(Date.now() / 1000);
+  const currentEnd = Math.ceil(nowSec / 300) * 300 || (Math.floor(nowSec / 300) + 1) * 300;
+  const windows = [currentEnd, currentEnd + 300, currentEnd + 600];
 
-  try {
-    const urls = [
-      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200`,
-      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200&tag_slug=crypto`,
-      `${CONFIG.gammaBaseUrl}/events?active=true&limit=100`,
-      `${CONFIG.gammaBaseUrl}/events?active=true&limit=100&tag_slug=crypto`,
-      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200&closed=false`,
-    ];
-
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) continue;
-        const data = await res.json();
-        const markets = extractMarkets(data);
-        const filtered = markets.filter(isCryptoUpDownMarket);
-        results.push(...filtered);
-      } catch { continue; }
+  const fetches = [];
+  for (const [asset, prefixes] of Object.entries(ASSET_PREFIXES)) {
+    for (const prefix of prefixes) {
+      for (const windowEnd of windows) {
+        const slug = `${prefix}-updown-5m-${windowEnd}`;
+        fetches.push({ asset, slug, windowEndMs: windowEnd * 1000 });
+      }
     }
-  } catch { /* ignore */ }
+  }
+
+  const settled = await Promise.allSettled(
+    fetches.map(({ asset, slug, windowEndMs }) =>
+      fetchEventBySlug(slug).then(events =>
+        events.flatMap(ev =>
+          (ev.markets ?? []).flatMap(m => {
+            const n = normalizeSlugMarket(m, asset, windowEndMs);
+            return n ? [n] : [];
+          })
+        )
+      )
+    )
+  );
+
+  const all = settled.flatMap(r => r.status === "fulfilled" ? r.value : []);
 
   const seen = new Set();
-  const unique = [];
-  for (const m of results) {
-    const key = m.conditionId || m.id || m.question;
-    if (!seen.has(key)) { seen.add(key); unique.push(m); }
-  }
+  const unique = all.filter(m => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
 
-  const markets = unique.map(normalizeCryptoMarket).filter(Boolean);
-  _marketsCache = markets;
+  _marketsCache = unique;
   _marketsCachedAt = Date.now();
-  return markets;
+  return unique;
 }
 
-export async function fetchMarketById(conditionId) {
+async function fetchEventBySlug(slug) {
   try {
-    const res = await fetch(`${CONFIG.gammaBaseUrl}/markets/${conditionId}`, { signal: AbortSignal.timeout(4000) });
-    if (!res.ok) return null;
-    return normalizeCryptoMarket(await res.json());
-  } catch { return null; }
+    const res = await fetch(
+      `${CONFIG.gammaBaseUrl}/events?slug=${encodeURIComponent(slug)}`,
+      { signal: AbortSignal.timeout(6000) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (Array.isArray(data)) return data.filter(Boolean);
+    if (data && typeof data === "object") return [data];
+    return [];
+  } catch { return []; }
 }
 
-function extractMarkets(data) {
-  if (!data) return [];
-  if (Array.isArray(data)) {
-    const flat = [];
-    for (const item of data) {
-      if (item.markets && Array.isArray(item.markets)) flat.push(...item.markets);
-      else flat.push(item);
-    }
-    return flat;
-  }
-  if (data.markets) return Array.isArray(data.markets) ? data.markets : [];
-  return [data];
-}
-
-function isCryptoUpDownMarket(m) {
-  const q = String(m.question || m.title || m.slug || "").toLowerCase();
-
-  const isCrypto =
-    q.includes("bitcoin")   || /\bbtc\b/.test(q)  ||
-    q.includes("ethereum")  || /\beth\b/.test(q)  ||
-    q.includes("solana")    || /\bsol\b/.test(q)  ||
-    q.includes("ripple")    || /\bxrp\b/.test(q)  ||
-    q.includes("dogecoin")  || /\bdoge\b/.test(q) ||
-    q.includes("avalanche") || /\bavax\b/.test(q) ||
-    q.includes("chainlink") || /\blink\b/.test(q) ||
-    q.includes("polygon")   || /\bmatic\b/.test(q);
-
-  const isUpDown =
-    q.includes("up or down") || q.includes("higher") || q.includes("above") ||
-    q.includes("lower or higher") || q.includes("go up") || q.includes("price up") ||
-    q.includes("will") || q.includes("reach") || q.includes("exceed");
-
-  const end    = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
-  const isOpen = end ? end > Date.now() : true;
-
-  return isCrypto && isUpDown && isOpen;
-}
-
-function normalizeCryptoMarket(m) {
+function normalizeSlugMarket(m, asset, windowEndMs) {
   if (!m) return null;
 
-  const question = String(m.question || m.title || "");
-  const q = question.toLowerCase();
-
-  const asset =
-    q.includes("bitcoin")   || q.includes("btc")  ? "BTC"  :
-    q.includes("ethereum")  || q.includes("eth")  ? "ETH"  :
-    q.includes("solana")    || q.includes("sol")  ? "SOL"  :
-    q.includes("ripple")    || q.includes("xrp")  ? "XRP"  :
-    q.includes("dogecoin")  || q.includes("doge") ? "DOGE" :
-    q.includes("avalanche") || q.includes("avax") ? "AVAX" :
-    q.includes("chainlink") || q.includes("link") ? "LINK" :
-    q.includes("polygon")   || q.includes("matic")? "MATIC": null;
-
-  if (!asset) return null;
-
-  const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
+  const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime) ?? windowEndMs;
   if (!endMs || endMs <= Date.now()) return null;
 
   const tokens = getTokenIds(m);
   if (!tokens.upTokenId || !tokens.downTokenId) return null;
 
-  const startMs    = safeTimeMs(m.startDate || m.startTime);
-  const duration   = startMs ? endMs - startMs : null;
-  const windowMins = duration
-    ? duration <= 6 * 60_000  ? 5
-    : duration <= 18 * 60_000 ? 15
-    : Math.round(duration / 60_000)   // preserve actual duration in minutes
-    : 1440;
+  const question = String(m.question || m.title || `${asset} Up or Down 5m`);
 
   let initialYes = null, initialNo = null;
   try {
@@ -140,32 +106,57 @@ function normalizeCryptoMarket(m) {
   } catch { /* ignore */ }
 
   return {
-    id: m.conditionId || m.id || m.slug || question,
-    asset, question, windowMins,
-    upTokenId: tokens.upTokenId, downTokenId: tokens.downTokenId,
-    endMs, initialYes, initialNo,
+    id: m.conditionId || m.id || tokens.upTokenId,
+    asset,
+    question,
+    windowMins: 5,
+    upTokenId:   tokens.upTokenId,
+    downTokenId: tokens.downTokenId,
+    endMs,
+    initialYes,
+    initialNo,
   };
+}
+
+export async function fetchMarketById(conditionId) {
+  try {
+    const res = await fetch(`${CONFIG.gammaBaseUrl}/markets/${conditionId}`, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    const m = await res.json();
+    // Try to detect asset from question
+    const q = String(m.question || m.title || "").toLowerCase();
+    const asset =
+      q.includes("bitcoin") || q.includes("btc")  ? "BTC"  :
+      q.includes("ethereum") || q.includes("eth") ? "ETH"  :
+      q.includes("solana") || q.includes("sol")   ? "SOL"  :
+      q.includes("ripple") || q.includes("xrp")   ? "XRP"  :
+      q.includes("dogecoin") || q.includes("doge")? "DOGE" :
+      q.includes("avalanche") || q.includes("avax")? "AVAX":
+      q.includes("chainlink") || q.includes("link")? "LINK":
+      q.includes("polygon") || q.includes("matic")? "MATIC": "BTC";
+    return normalizeSlugMarket(m, asset, null);
+  } catch { return null; }
 }
 
 function getTokenIds(market) {
   if (!market) return { upTokenId: null, downTokenId: null };
 
-  if (Array.isArray(market.clobTokenIds) && market.clobTokenIds.length >= 2) {
-    return { upTokenId: market.clobTokenIds[0], downTokenId: market.clobTokenIds[1] };
-  }
+  // clobTokenIds may be a JSON-encoded string: "[\"id1\",\"id2\"]"
+  try {
+    let ids = market.clobTokenIds;
+    if (typeof ids === "string") ids = JSON.parse(ids);
+    if (Array.isArray(ids) && ids.length >= 2) {
+      return { upTokenId: String(ids[0]), downTokenId: String(ids[1]) };
+    }
+  } catch { /* ignore */ }
 
+  // Fallback: tokens array
   if (Array.isArray(market.tokens)) {
-    const up = market.tokens.find((t) => {
-      const o = String(t.outcome || "").toLowerCase();
-      return o === "up" || o === "yes" || o === "higher" || o === "above";
-    });
-    const down = market.tokens.find((t) => {
-      const o = String(t.outcome || "").toLowerCase();
-      return o === "down" || o === "no" || o === "lower" || o === "below";
-    });
+    const up = market.tokens.find(t => /^(up|yes|higher|above)$/i.test(String(t.outcome || "")));
+    const dn = market.tokens.find(t => /^(down|no|lower|below)$/i.test(String(t.outcome || "")));
     return {
-      upTokenId:   up?.token_id   || up?.tokenId   || null,
-      downTokenId: down?.token_id || down?.tokenId || null,
+      upTokenId:   String(up?.token_id   ?? up?.tokenId   ?? "") || null,
+      downTokenId: String(dn?.token_id   ?? dn?.tokenId   ?? "") || null,
     };
   }
 
