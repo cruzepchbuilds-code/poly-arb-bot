@@ -104,6 +104,13 @@ const HTML = `<!DOCTYPE html>
   <div class="cards" id="cards"></div>
 
   <div class="section">
+    <div class="section-header">Live Token Prices (WS) <span style="color:#555;font-size:10px;font-weight:400;margin-left:8px">UP¢ + DN¢ — null = no WS data yet</span></div>
+    <div id="ws-debug-body">
+      <div class="empty">Waiting for WS data...</div>
+    </div>
+  </div>
+
+  <div class="section">
     <div class="section-header">
       Active Positions
       <span id="pos-count" class="section-count">0</span>
@@ -206,7 +213,7 @@ function render(d) {
       <div class="card-pnl \${pnlClass(sniperPnl)}">\${fmtPnl(sniperPnl)}</div>
     </div>
     <div class="card">
-      <div class="card-title">Fade (20-45¢)</div>
+      <div class="card-title">Fade (20-48¢)</div>
       <div class="card-main">\${fd.entered ?? 0}</div>
       <div class="card-sub">\${fd.won ?? 0}W / \${fd.lost ?? 0}L · WR \${fWr}</div>
       <div class="card-pnl \${pnlClass(fadePnl)}">\${fmtPnl(fadePnl)}</div>
@@ -228,6 +235,38 @@ function render(d) {
       <div class="card-sub">Order-book momentum</div>
     </div>
   \`;
+
+  // WS token prices debug
+  const wsSample = d.wsSample ?? [];
+  const wsDebugEl = document.getElementById('ws-debug-body');
+  if (wsSample.length === 0) {
+    wsDebugEl.innerHTML = '<div class="empty">No markets loaded yet</div>';
+  } else {
+    const nullCount = wsSample.filter(r => r.up == null && r.dn == null).length;
+    const rows = wsSample.map(r => {
+      const comb = r.up != null && r.dn != null ? (r.up + r.dn).toFixed(3) : '—';
+      const combClr = (r.up != null && r.dn != null && r.up + r.dn < 0.99) ? 'color:#22c55e;font-weight:600' : 'color:#555';
+      const upClr = r.up != null && r.up < 0.48 && r.up >= 0.20 ? 'color:#22c55e;font-weight:600' : '';
+      const dnClr = r.dn != null && r.dn < 0.48 && r.dn >= 0.20 ? 'color:#22c55e;font-weight:600' : '';
+      const left = r.endMs ? Math.max(0, Math.round((r.endMs - Date.now()) / 1000)) + 's' : '—';
+      return \`<tr>
+        <td style="font-weight:600">\${r.asset}</td>
+        <td style="\${upClr}">\${r.up != null ? (r.up*100).toFixed(1)+'¢' : '<span style="color:#333">null</span>'}</td>
+        <td style="\${dnClr}">\${r.dn != null ? (r.dn*100).toFixed(1)+'¢' : '<span style="color:#333">null</span>'}</td>
+        <td style="\${combClr}">\${comb}</td>
+        <td class="time-left">\${left}</td>
+      </tr>\`;
+    }).join('');
+    const header = nullCount === wsSample.length
+      ? \`<div style="padding:8px 14px;color:#ef4444;font-size:12px">⚠ All prices null — WS not delivering data</div>\`
+      : nullCount > 0
+      ? \`<div style="padding:8px 14px;color:#f59e0b;font-size:12px">⚠ \${nullCount}/\${wsSample.length} markets have null prices</div>\`
+      : \`<div style="padding:8px 14px;color:#22c55e;font-size:12px">✓ WS prices flowing for all \${wsSample.length} markets</div>\`;
+    wsDebugEl.innerHTML = header + \`<table>
+      <thead><tr><th>Asset</th><th>UP</th><th>DOWN</th><th>Combined</th><th>Expires</th></tr></thead>
+      <tbody>\${rows}</tbody>
+    </table>\`;
+  }
 
   // Active positions
   const positions = d.activePositions ?? [];

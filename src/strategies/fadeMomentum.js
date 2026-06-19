@@ -4,8 +4,8 @@
 
 const DEFAULTS = {
   minTokenPrice:   0.20,   // token must be at least 20¢ (avoids overlap with sniper)
-  maxTokenPrice:   0.45,   // token at most 45¢
-  minPriceMovePct: 0.002,  // asset must have moved 0.2% from window open
+  maxTokenPrice:   0.48,   // token at most 48¢
+  minPriceMovePct: 0.001,  // asset must have moved 0.1% from window open
   minTimeMs:       60_000, // at least 60s remaining
   maxTimeMs:       300_000,// enter only in final 5 minutes
   betUsdc:         5,      // flat $5 per trade while testing

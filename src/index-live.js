@@ -860,6 +860,10 @@ async function main() {
     sniper: { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
     fade:   { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
     sweep:  { followed: sweepStats.followed },
+    wsSample: marketList.slice(0, 16).map(m => {
+      const { yesPrice, noPrice } = clobWs.getPrices(m.upTokenId, m.downTokenId);
+      return { asset: m.asset, up: yesPrice, dn: noPrice, endMs: m.endMs };
+    }),
     recentTrades: [...sniperStats.history, ...lemStats.history, ...stats.history]
       .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 15),
     timestamp: Date.now(),
