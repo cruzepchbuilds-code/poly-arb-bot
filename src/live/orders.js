@@ -14,12 +14,13 @@ export async function placeLimitBuy(tokenId, price = PRICE_LIMIT, size = SHARES)
   }
 
   const client = getClient();
+  const feeRateBps = await client.getFeeRateBps(tokenId).catch(() => 0);
   const order = await client.createOrder({
     tokenID: tokenId,
     price,
     size,
     side: Side.BUY,
-    feeRateBps: 0,
+    feeRateBps,
     nonce: 0,
     expiration: 0,
   });
