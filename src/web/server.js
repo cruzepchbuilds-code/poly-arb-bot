@@ -493,7 +493,7 @@ function render(d){
   const lemPnl   =(d.lem?.totalPayout??0)-(d.lem?.totalSpent??0);
   const fadePnl  =(d.fade?.totalPayout??0)-(d.fade?.totalSpent??0);
   const arbPnl   =d.arb?.guaranteedProfit??0;
-  const totalPnl =sniperPnl+lemPnl+fadePnl+arbPnl;
+  const totalPnl =(d.balance??0)-(d.startBalance??100);
   const pe=document.getElementById('pnl-display');
   pe.textContent=(totalPnl>=0?'+':'')+fmt(totalPnl)+' total P&L';
   pe.className='header-pnl '+pnlCls(totalPnl);
