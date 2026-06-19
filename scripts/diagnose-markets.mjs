@@ -3,9 +3,11 @@ const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB  = "https://clob.polymarket.com";
 
 async function fetchJson(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
-  if (!res.ok) { console.log(`HTTP ${res.status} for ${url}`); return null; }
-  return res.json();
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!res.ok) { console.log(`HTTP ${res.status} for ${url}`); return null; }
+    return res.json();
+  } catch (e) { console.log(`FETCH ERROR ${url}: ${e.message}`); return null; }
 }
 
 function safeTimeMs(v) {
@@ -15,94 +17,103 @@ function safeTimeMs(v) {
 }
 
 async function main() {
-  console.log("=== DIAGNOSTIC v3 ===\n");
+  console.log("=== DIAGNOSTIC v4 ===\n");
   const now = Date.now();
 
-  // --- CLOB: find short-duration markets (expire < 2h from now) ---
-  console.log("--- CLOB: short-duration markets (expire within 2h) ---");
-  const clob1 = await fetchJson(`${CLOB}/markets?limit=500`);
-  const clobMs = clob1?.data ?? (Array.isArray(clob1) ? clob1 : []);
-  console.log(`CLOB returned: ${clobMs.length} markets`);
-
-  // Show structure of first market
-  if (clobMs[0]) {
-    console.log("\nFirst CLOB market fields:", Object.keys(clobMs[0]).join(", "));
-    console.log("Sample:", JSON.stringify({
-      question: clobMs[0].question,
-      condition_id: clobMs[0].condition_id,
-      end_date_iso: clobMs[0].end_date_iso,
-      active: clobMs[0].active,
-      closed: clobMs[0].closed,
-      tokens: clobMs[0].tokens?.map(t => ({ outcome: t.outcome, token_id: t.token_id?.slice(0,12) })),
-    }, null, 2));
-  }
-
-  const short = clobMs.filter(m => {
-    const end = safeTimeMs(m.end_date_iso || m.endDate || m.end_date);
-    return end && end > now && end < now + 2 * 60 * 60_000;
-  });
-  console.log(`\nExpires within 2h: ${short.length}`);
-  for (const m of short.slice(0, 10)) {
+  // --- 1: CLOB with closed=false ---
+  console.log("--- CLOB: closed=false ---");
+  const clobActive = await fetchJson(`${CLOB}/markets?limit=500&closed=false`);
+  const caMs = clobActive?.data ?? (Array.isArray(clobActive) ? clobActive : []);
+  console.log(`closed=false returned: ${caMs.length}`);
+  const caShort = caMs.filter(m => {
     const end = safeTimeMs(m.end_date_iso || m.endDate);
-    const minsLeft = end ? Math.round((end - now) / 60000) : null;
-    console.log(`  [${minsLeft}m left] "${m.question?.slice(0,70)}"`);
-    console.log(`    tokens: ${m.tokens?.map(t => t.outcome).join(" / ")}`);
-    console.log(`    condition_id: ${m.condition_id}`);
-  }
-
-  // --- Gamma: try limit=1000 ---
-  console.log("\n--- Gamma: limit=1000 ---");
-  const g1000 = await fetchJson(`${GAMMA}/markets?active=true&limit=1000`);
-  const gMs = Array.isArray(g1000) ? g1000 : (g1000?.markets ?? []);
-  console.log(`Gamma limit=1000 returned: ${gMs.length}`);
-
-  // --- Gamma: try specific category params ---
-  console.log("\n--- Gamma: tag_slug variations ---");
-  for (const tag of ["crypto", "bitcoin", "btc", "5-min", "5min", "short"]) {
-    const d = await fetchJson(`${GAMMA}/markets?active=true&limit=100&tag_slug=${tag}`);
-    const ms = Array.isArray(d) ? d : (d?.markets ?? []);
-    const ud = ms.filter(m => {
-      const q = String(m.question || "").toLowerCase();
-      return q.includes("up or down") || q.includes("higher or lower") || (q.includes("btc") && q.includes("5"));
-    });
-    console.log(`  tag_slug=${tag}: ${ms.length} markets, ${ud.length} up/down/5min`);
-  }
-
-  // --- Gamma: look for short-duration markets by endDate ---
-  console.log("\n--- Gamma: markets expiring within 1h ---");
-  const allG = [];
-  for (const offset of [0, 100, 200, 300, 400]) {
-    const d = await fetchJson(`${GAMMA}/markets?active=true&limit=100&offset=${offset}`);
-    const ms = Array.isArray(d) ? d : (d?.markets ?? []);
-    allG.push(...ms);
-    if (ms.length < 100) break;
-  }
-  const shortG = allG.filter(m => {
-    const end = safeTimeMs(m.endDate);
-    return end && end > now && end < now + 60 * 60_000;
+    return end && end > now && end < now + 6 * 60 * 60_000;
   });
-  console.log(`Markets expiring within 1h: ${shortG.length}`);
-  for (const m of shortG.slice(0, 5)) {
-    const end = safeTimeMs(m.endDate);
+  console.log(`Expiring within 6h: ${caShort.length}`);
+  for (const m of caShort.slice(0, 10)) {
+    const end = safeTimeMs(m.end_date_iso || m.endDate);
     const minsLeft = Math.round((end - now) / 60000);
-    console.log(`  [${minsLeft}m] "${m.question?.slice(0,70)}"`);
-    console.log(`    clobTokenIds: ${JSON.stringify(m.clobTokenIds)}`);
+    console.log(`  [${minsLeft}m] "${m.question?.slice(0, 70)}"`);
+    console.log(`    tokens: ${m.tokens?.map(t => t.outcome).join(" / ")}`);
   }
 
-  // --- Try Gamma events with crypto tag ---
-  console.log("\n--- Gamma events with tag_slug=crypto ---");
-  const evCrypto = await fetchJson(`${GAMMA}/events?active=true&limit=100&tag_slug=crypto`);
-  const evMs = Array.isArray(evCrypto) ? evCrypto : (evCrypto?.events ?? []);
-  console.log(`Events returned: ${evMs.length}`);
-  const shortEv = evMs.filter(e => {
-    const t = String(e.title || "").toLowerCase();
-    return t.includes("5") || t.includes("btc") || t.includes("bitcoin");
+  // --- 2: CLOB paginate to find newer markets ---
+  console.log("\n--- CLOB: paginate with next_cursor ---");
+  let cursor = "MA=="; // base64 of "0" - start cursor
+  let page = 0;
+  let foundActive = [];
+  while (page < 5) {
+    const d = await fetchJson(`${CLOB}/markets?limit=500&next_cursor=${cursor}`);
+    if (!d) break;
+    const ms = d.data ?? (Array.isArray(d) ? d : []);
+    const nextCursor = d.next_cursor;
+    const active = ms.filter(m => !m.closed && m.active);
+    foundActive.push(...active);
+    console.log(`  page ${page}: ${ms.length} markets, ${active.length} active, cursor=${nextCursor?.slice(0,20)}`);
+    if (!nextCursor || nextCursor === cursor || ms.length < 500) break;
+    cursor = nextCursor;
+    page++;
+  }
+  console.log(`Total active found: ${foundActive.length}`);
+  const shortActive = foundActive.filter(m => {
+    const end = safeTimeMs(m.end_date_iso || m.endDate);
+    return end && end > now && end < now + 6 * 60 * 60_000;
   });
-  console.log(`BTC/5min events: ${shortEv.length}`);
-  for (const e of shortEv.slice(0, 5)) {
-    console.log(`  "${e.title}" markets:${e.markets?.length}`);
-    const m = e.markets?.[0];
-    if (m) console.log(`    first: "${m.question?.slice(0,60)}" clobTokenIds:${JSON.stringify(m.clobTokenIds?.slice(0,1))?.slice(0,30)}...`);
+  console.log(`Expiring within 6h: ${shortActive.length}`);
+  for (const m of shortActive.slice(0, 5)) {
+    const end = safeTimeMs(m.end_date_iso || m.endDate);
+    console.log(`  [${Math.round((end-now)/60000)}m] "${m.question?.slice(0,70)}"`);
+    console.log(`    tokens: ${m.tokens?.map(t => t.outcome+"/"+t.token_id?.slice(0,8)).join(" | ")}`);
+  }
+
+  // --- 3: Gamma events NO tag filter ---
+  console.log("\n--- Gamma events NO tag filter ---");
+  for (const offset of [0, 100, 200]) {
+    const d = await fetchJson(`${GAMMA}/events?active=true&limit=100&offset=${offset}`);
+    const evs = Array.isArray(d) ? d : (d?.events ?? []);
+    const updown = evs.filter(e => {
+      const t = String(e.title || e.slug || "").toLowerCase();
+      return t.includes("up or down") || t.includes("up-or-down") || t.includes("5m") || t.includes("5-min");
+    });
+    console.log(`  offset=${offset}: ${evs.length} events, ${updown.length} up/down or 5m`);
+    for (const e of updown.slice(0, 5)) {
+      console.log(`    "${e.title}" slug=${e.slug} markets:${e.markets?.length}`);
+      const m = e.markets?.find(mx => {
+        const end = safeTimeMs(mx.endDate);
+        return end && end > now;
+      });
+      if (m) {
+        console.log(`    ACTIVE market: "${m.question?.slice(0,60)}" ends=${m.endDate}`);
+        console.log(`    clobTokenIds: ${JSON.stringify(m.clobTokenIds)?.slice(0, 80)}`);
+      }
+    }
+  }
+
+  // --- 4: Gamma: search= param ---
+  console.log("\n--- Gamma: search=btc ---");
+  for (const q of ["btc up", "bitcoin up", "up or down", "5 minutes", "5m"]) {
+    const d = await fetchJson(`${GAMMA}/markets?active=true&limit=100&search=${encodeURIComponent(q)}`);
+    const ms = Array.isArray(d) ? d : (d?.markets ?? []);
+    console.log(`  search="${q}": ${ms.length} results`);
+    for (const m of ms.slice(0, 3)) {
+      const end = safeTimeMs(m.endDate);
+      const minsLeft = end ? Math.round((end - now) / 60000) : null;
+      console.log(`    [${minsLeft}m] "${m.question?.slice(0,60)}" clobTokenIds:${!!m.clobTokenIds}`);
+    }
+  }
+
+  // --- 5: Check data-api.polymarket.com ---
+  console.log("\n--- data-api.polymarket.com ---");
+  const dataApi = await fetchJson("https://data-api.polymarket.com/markets?limit=50&active=true");
+  if (dataApi) {
+    const ms = Array.isArray(dataApi) ? dataApi : (dataApi?.markets ?? dataApi?.data ?? []);
+    console.log(`data-api returned: ${ms.length}`);
+    const updown = ms.filter(m => String(m.question||"").toLowerCase().includes("up or down"));
+    console.log(`up or down: ${updown.length}`);
+    for (const m of updown.slice(0, 3)) {
+      const end = safeTimeMs(m.endDate || m.end_date_iso);
+      console.log(`  [${end ? Math.round((end-now)/60000)+"m" : "?"}] "${m.question?.slice(0,60)}"`);
+    }
   }
 
   console.log("\n=== DONE ===");
