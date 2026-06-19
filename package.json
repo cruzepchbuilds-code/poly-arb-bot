@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/index.js",
     "live": "node src/index-live.js",
-    "setup": "node setup.js"
+    "setup": "node setup.js",
+    "reset": "node -e \"const fs=require('fs');['trades.jsonl','sim-state.json'].forEach(f=>{try{fs.unlinkSync(f);console.log('deleted',f);}catch{console.log('not found',f);}});\""
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.1",
