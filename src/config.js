@@ -19,10 +19,10 @@ export const CONFIG = {
   combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.99,
   momentumMinPct: 0.0002,
 
-  kellyFraction:    0.50,
-  estimatedWinRate: 0.62,
+  kellyFraction:    0.25,
+  estimatedWinRate: 0.55,
   minBetUsdc:       2,
-  maxBetPct:        0.30,
+  maxBetPct:        0.08,
 
   maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || null,
   maxPositions: Number(process.env.MAX_POSITIONS) || 15,

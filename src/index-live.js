@@ -526,7 +526,7 @@ async function main() {
       try {
         const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
         const available = Math.max(0, simBalance - allocated);
-        const betSize   = Math.min(CONFIG.maxTradeUsdc, available * 0.20);
+        const betSize   = Math.min(simBalance * 0.07, available);
         if (betSize < 1) return;
         const binanceOpenPrice = lateEntry.getOpenPrice(market.id) ?? feeds[market.asset]?.get() ?? null;
         const pos = new DirectionalPosition({
@@ -636,7 +636,7 @@ async function main() {
         try {
           const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
           const available = Math.max(0, simBalance - allocated);
-          const betSize   = available * 0.15 * crossConf;
+          const betSize   = Math.min(simBalance * 0.05, available) * crossConf;
           if (betSize < 1) return;
           const pos = new DirectionalPosition({
             id: market.id, asset: market.asset,
