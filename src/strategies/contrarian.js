@@ -3,18 +3,57 @@
 // Edge: market underprices mean-reversion probability after violent BTC moves
 
 const DEFAULTS = {
-  maxTokenPrice:   0.12,    // only buy when token is 12 cents or less
-  minPriceMovePct: 0.0025,  // asset must have moved 0.25% from market open
-  minTimeMs:       30_000,  // at least 30s remaining at entry
-  maxTimeMs:       180_000, // enter only in final 3 minutes
-  betSizeUsdc:     25,      // flat $25 per snipe — small, repeatable
+  maxTokenPrice:    0.12,   // only buy when token is 12 cents or less
+  minPriceMovePct:  0.0025, // asset must have moved 0.25% from market open
+  minTimeMs:        30_000, // at least 30s remaining at entry
+  maxTimeMs:        180_000,// enter only in final 3 minutes
+  kellyFraction:    0.25,   // 25% fractional Kelly — conservative until edge confirmed
+  minBetUsdc:       5,      // never bet less than $5
+  maxBetPct:        0.04,   // never more than 4% of bankroll per snipe
+  maxBetUsdc:       500,    // hard cap — Polymarket liquidity limit
+  baseWinRate:      0.095,  // 0xa689 baseline until we have our own data
+  minTradesForLive: 20,     // switch to observed win rate after this many trades
 };
 
 export class ContrarianSniper {
   constructor(opts = {}) {
-    this.cfg = { ...DEFAULTS, ...opts };
+    this.cfg    = { ...DEFAULTS, ...opts };
+    this._wins  = opts.initialWins   ?? 0;
+    this._losses= opts.initialLosses ?? 0;
     this._openPrices = new Map(); // marketId → { price }
     this._fired      = new Set(); // marketIds already entered this window
+  }
+
+  // Dynamic Kelly bet size — scales automatically with bankroll
+  // Bigger bankroll = bigger bet. Better edge (cheaper token) = bigger fraction.
+  calcBetSize(tokenPrice, bankroll) {
+    const winRate = this.winRate;
+    const edge    = winRate - tokenPrice;
+    if (edge <= 0) return 0; // token price ≥ win rate → no edge, skip
+
+    const kelly  = edge / (1 - tokenPrice);          // full Kelly fraction
+    const scaled = bankroll * kelly * this.cfg.kellyFraction;
+
+    return Math.max(
+      this.cfg.minBetUsdc,
+      Math.min(scaled, bankroll * this.cfg.maxBetPct, this.cfg.maxBetUsdc)
+    );
+  }
+
+  // Win rate: use observed once we have enough data, else 0xa689 baseline
+  get winRate() {
+    const total = this._wins + this._losses;
+    return total >= this.cfg.minTradesForLive
+      ? this._wins / total
+      : this.cfg.baseWinRate;
+  }
+
+  get tradeCount() { return this._wins + this._losses; }
+
+  // Call after each resolved sniper position so win rate self-updates
+  recordResult(won) {
+    if (won === true)  this._wins++;
+    else if (won === false) this._losses++;
   }
 
   recordOpen(marketId, currentPrice) {
@@ -44,11 +83,14 @@ export class ContrarianSniper {
 
     const delta = (currentPrice - open.price) / open.price;
 
+    // Skip if token price has no edge vs current win rate
     if (delta <= -minPriceMovePct && upTokenPrice != null && upTokenPrice <= maxTokenPrice) {
+      if (upTokenPrice >= this.winRate) return { side: null }; // no edge
       return { side: "UP", tokenId: market.upTokenId, tokenPrice: upTokenPrice, delta };
     }
 
     if (delta >= minPriceMovePct && downTokenPrice != null && downTokenPrice <= maxTokenPrice) {
+      if (downTokenPrice >= this.winRate) return { side: null }; // no edge
       return { side: "DOWN", tokenId: market.downTokenId, tokenPrice: downTokenPrice, delta };
     }
 

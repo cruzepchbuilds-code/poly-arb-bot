@@ -141,7 +141,7 @@ class SniperStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, sweepStats, sniperStats, usdcBalance,
+  activePositions, stats, lemStats, sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance,
   wsConnected, wsLastUpdate, wsMarkets,
 }) {
@@ -272,7 +272,12 @@ function render({
     const pnlClr = sniperPnl >= 0 ? C.bgreen : C.bred;
     out.push(row(`P&L: ${pnlClr}${sniperPnl >= 0 ? "+" : ""}${fmtUsd(sniperPnl)}${C.reset}  │  Spent: ${fmtUsd(sniperStats.totalSpent)}`));
   } else {
-    out.push(row(`${C.dim}Watching for extreme price moves on 5-min markets (token < 12¢)...${C.reset}`));
+    const wr   = (sniper.winRate * 100).toFixed(1);
+    const src  = sniper.tradeCount >= sniper.cfg.minTradesForLive ? "observed" : "baseline";
+    const k3c  = sniper.calcBetSize(0.03, simBalance).toFixed(2);
+    const k7c  = sniper.calcBetSize(0.07, simBalance).toFixed(2);
+    out.push(row(`${C.dim}Win rate: ${wr}% (${src}, ${sniper.tradeCount} trades)  │  Kelly: 3¢→$${k3c}  7¢→$${k7c}${C.reset}`));
+    out.push(row(`${C.dim}Watching for extreme price moves on 5-min markets (token < ${wr}%)...${C.reset}`));
   }
 
   out.push(row(""));
@@ -394,9 +399,25 @@ async function main() {
   const stats             = new Stats();
   const lemStats          = new LemStats();
   const sweepStats        = new SweepStats();
-  const sniperStats       = new SniperStats();
-  const sniper            = new ContrarianSniper({
-    betSizeUsdc: Number(process.env.SNIPER_BET_USDC) || 25,
+  const sniperStats = new SniperStats();
+
+  // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
+  let _seedWins = 0, _seedLosses = 0;
+  try {
+    const { readFileSync: rfs } = await import("fs");
+    for (const line of rfs("trades.jsonl", "utf8").trim().split("\n")) {
+      try {
+        const t = JSON.parse(line);
+        if (t.strategy !== "SNIPER") continue;
+        if (t.won === true) _seedWins++;
+        else if (t.won === false) _seedLosses++;
+      } catch { /* ignore bad lines */ }
+    }
+  } catch { /* no trade log yet */ }
+
+  const sniper = new ContrarianSniper({
+    initialWins:   _seedWins,
+    initialLosses: _seedLosses,
   });
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
@@ -648,8 +669,8 @@ async function main() {
 
       const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
       const available = Math.max(0, simBalance - allocated);
-      const betSize   = Math.min(sniper.cfg.betSizeUsdc, available);
-      if (betSize < 1) continue;
+      const betSize   = Math.min(sniper.calcBetSize(signal.tokenPrice, simBalance), available);
+      if (betSize < sniper.cfg.minBetUsdc) continue;
 
       sniper.markFired(market.id);
       enteringMarkets.add(market.id);
@@ -711,6 +732,7 @@ async function main() {
             if (pos.sniper) {
               logTrade({ ...s, strategy: "SNIPER" });
               sniperStats.record(s);
+              sniper.recordResult(s.won);
               sniper.clearMarket(id);
             } else {
               logTrade({ ...s, strategy: "LEM" });
@@ -771,7 +793,7 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, sweepStats, sniperStats, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       opportunities: getOpportunities(),
       now:           Date.now(),
       simBalance,
