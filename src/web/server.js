@@ -327,6 +327,69 @@ function render(d) {
     </table>\`;
   }
 
+  // Analytics
+  const an = d.analytics;
+  const analSection = document.getElementById('analytics-section');
+  if (an && an.resolved >= 5) {
+    analSection.style.display = '';
+    document.getElementById('analytics-updated').textContent = 'updated ' + ago(an.lastUpdated);
+
+    // Suggestions
+    const suggestions = an.suggestions ?? [];
+    document.getElementById('analytics-suggestions').innerHTML = suggestions.length
+      ? suggestions.map(s => {
+          const cls = s.includes('strong') || s.includes('prioritize') ? 'insight'
+                    : s.includes('declining') || s.includes('avoid') || s.includes('reduce') ? 'insight bad'
+                    : 'insight warn';
+          return \`<div class="\${cls}" style="margin-bottom:6px">💡 \${s}</div>\`;
+        }).join('')
+      : \`<div style="color:#444;font-size:12px">Running... need more trades for insights</div>\`;
+
+    // Strategy table
+    const strats = Object.entries(an.byStrategy ?? {}).sort((a,b) => (b[1].pnl??0)-(a[1].pnl??0));
+    document.getElementById('tbl-strategy').innerHTML =
+      '<thead><tr><th>Strategy</th><th>W/L</th><th>WR%</th><th>P&L</th><th>Avg@</th></tr></thead><tbody>' +
+      strats.map(([k,v]) => {
+        const wr = v.winRate != null ? (v.winRate*100).toFixed(0)+'%' : '—';
+        const wrClr = v.winRate > 0.6 ? '#22c55e' : v.winRate < 0.45 ? '#ef4444' : '#f59e0b';
+        const pnl = v.pnl >= 0 ? \`<span style="color:#22c55e">+\$\${v.pnl.toFixed(2)}</span>\` : \`<span style="color:#ef4444">-\$\${Math.abs(v.pnl).toFixed(2)}</span>\`;
+        return \`<tr><td>\${k}</td><td>\${v.wins}/\${v.losses}</td><td style="color:\${wrClr}">\${wr}</td><td>\${pnl}</td><td>\${v.avgEntry!=null?(v.avgEntry*100).toFixed(0)+'¢':'—'}</td></tr>\`;
+      }).join('') + '</tbody>';
+
+    // Asset table
+    const assets = Object.entries(an.byAsset ?? {}).sort((a,b) => (b[1].pnl??0)-(a[1].pnl??0));
+    document.getElementById('tbl-asset').innerHTML =
+      '<thead><tr><th>Asset</th><th>W/L</th><th>WR%</th><th>P&L</th></tr></thead><tbody>' +
+      assets.map(([k,v]) => {
+        const wr = v.winRate != null ? (v.winRate*100).toFixed(0)+'%' : '—';
+        const wrClr = v.winRate > 0.6 ? '#22c55e' : v.winRate < 0.45 ? '#ef4444' : '#f59e0b';
+        const pnl = v.pnl >= 0 ? \`<span style="color:#22c55e">+\$\${v.pnl.toFixed(2)}</span>\` : \`<span style="color:#ef4444">-\$\${Math.abs(v.pnl).toFixed(2)}</span>\`;
+        return \`<tr><td>\${k}</td><td>\${v.wins}/\${v.losses}</td><td style="color:\${wrClr}">\${wr}</td><td>\${pnl}</td></tr>\`;
+      }).join('') + '</tbody>';
+
+    // Price bucket table
+    const buckets = Object.entries(an.priceBuckets ?? {});
+    document.getElementById('tbl-price').innerHTML =
+      '<thead><tr><th>Range</th><th>W/L</th><th>WR%</th></tr></thead><tbody>' +
+      buckets.map(([k,v]) => {
+        const wr = v.winRate != null ? (v.winRate*100).toFixed(0)+'%' : '—';
+        const wrClr = v.winRate > 0.65 ? '#22c55e' : v.winRate < 0.45 ? '#ef4444' : '#f59e0b';
+        return \`<tr><td>\${k}</td><td>\${v.wins}/\${v.losses}</td><td style="color:\${wrClr}">\${wr}</td></tr>\`;
+      }).join('') + '</tbody>';
+
+    // Adaptive sizing table
+    const adaptiveStats = Object.entries(d.adaptive ?? {}).sort((a,b) => b[1].trades - a[1].trades);
+    document.getElementById('tbl-adaptive').innerHTML = adaptiveStats.length
+      ? '<thead><tr><th>Asset:Strategy</th><th>WR%</th><th>Multiplier</th></tr></thead><tbody>' +
+        adaptiveStats.map(([k,v]) => {
+          const wr = (v.winRate*100).toFixed(0)+'%';
+          const wrClr = v.winRate > 0.6 ? '#22c55e' : v.winRate < 0.45 ? '#ef4444' : '#f59e0b';
+          const mClr = v.multiplier > 1.0 ? '#22c55e' : v.multiplier < 1.0 ? '#ef4444' : '#888';
+          return \`<tr><td>\${k}</td><td style="color:\${wrClr}">\${wr}</td><td style="color:\${mClr}">\${v.multiplier.toFixed(2)}x</td></tr>\`;
+        }).join('') + '</tbody>'
+      : '<tr><td colspan="3" style="color:#444;text-align:center;padding:10px">No data yet</td></tr>';
+  }
+
   // Recent trades
   const trades = d.recentTrades ?? [];
   if (trades.length === 0) {
