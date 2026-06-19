@@ -7,7 +7,7 @@ import WebSocket from "ws";
 import { CONFIG } from "./config.js";
 import { fetchAll5minMarkets, fetchClobMidPrices } from "./data/polymarket.js";
 import { ClobWsFeed } from "./data/clobWs.js";
-import { logTrade } from "./data/logger.js";
+import { logTrade, loadTrades } from "./data/logger.js";
 import { loadSimState, saveSimState } from "./data/simState.js";
 import { WindowPosition } from "./live/positions.js";
 import { DirectionalPosition } from "./live/directional.js";
@@ -446,8 +446,25 @@ async function main() {
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
   const startBalance      = CONFIG.paper.startBalance;
-  const pnlHistory        = [{ t: Date.now(), v: simBalance }];
-  const trackPnl          = () => { pnlHistory.push({ t: Date.now(), v: simBalance }); if (pnlHistory.length > 500) pnlHistory.shift(); };
+
+  // Load all past trades from disk for history table + chart reconstruction
+  const allTradeHistory   = loadTrades().sort((a, b) => (a.enteredAt ?? 0) - (b.enteredAt ?? 0));
+
+  // Reconstruct pnlHistory from past trades so the chart shows the full journey
+  let _runBal = startBalance;
+  const pnlHistory = [{ t: allTradeHistory[0]?.enteredAt ?? Date.now(), v: startBalance }];
+  for (const t of allTradeHistory) {
+    if (t.enteredAt && t.payout != null && t.totalSpent != null) {
+      _runBal += (t.payout - t.totalSpent);
+      pnlHistory.push({ t: t.enteredAt, v: _runBal });
+    }
+  }
+  pnlHistory.push({ t: Date.now(), v: simBalance }); // anchor to current live balance
+
+  const trackPnl = () => {
+    pnlHistory.push({ t: Date.now(), v: simBalance });
+    if (pnlHistory.length > 1000) pnlHistory.splice(0, pnlHistory.length - 1000);
+  };
   let marketList          = [];
   let isMonitoring        = false;
   let isFallbackScanning  = false;
@@ -790,7 +807,8 @@ async function main() {
               const s = pos.summary;
               simBalance += s.payout;
               trackPnl();
-              logTrade({ ...s, strategy: "LEM-EARLY" });
+              const _t0 = { ...s, strategy: "LEM-EARLY" };
+              logTrade(_t0); allTradeHistory.push(_t0);
               lemStats.record(s);
               lateEntry.clearMarket(id);
               clobWs.removeMarket(id);
@@ -806,19 +824,22 @@ async function main() {
             simBalance += s.payout;
             trackPnl();
             if (pos.sniper) {
-              logTrade({ ...s, strategy: "SNIPER" });
+              const _ts = { ...s, strategy: "SNIPER" };
+              logTrade(_ts); allTradeHistory.push(_ts);
               sniperStats.record(s);
               sniper.recordResult(s.won);
               if (s.won !== null) adaptive.record(pos.asset, "SNIPER", s.won);
               sniper.clearMarket(id);
             } else if (pos.fade) {
-              logTrade({ ...s, strategy: "FADE" });
+              const _tf = { ...s, strategy: "FADE" };
+              logTrade(_tf); allTradeHistory.push(_tf);
               fadeStats.record(s);
               fade.recordResult(s.won);
               if (s.won !== null) adaptive.record(pos.asset, "FADE", s.won);
               fade.clearMarket(id);
             } else {
-              logTrade({ ...s, strategy: "LEM" });
+              const _tl = { ...s, strategy: "LEM" };
+              logTrade(_tl); allTradeHistory.push(_tl);
               lemStats.record(s);
               if (s.won !== null) adaptive.record(pos.asset, "LEM", s.won);
               lateEntry.clearMarket(id);
@@ -844,7 +865,7 @@ async function main() {
             else if (s.upFilled || s.downFilled) simBalance += (s.shares ?? 0) * 0.50;
             else simBalance += s.totalSpent ?? 0;
             trackPnl();
-            logTrade(s);
+            logTrade(s); allTradeHistory.push(s);
             stats.record(pos);
             clobWs.removeMarket(id);
             activePositions.delete(id);
@@ -882,8 +903,7 @@ async function main() {
       const { yesPrice, noPrice } = clobWs.getPrices(m.upTokenId, m.downTokenId);
       return { asset: m.asset, up: yesPrice, dn: noPrice, endMs: m.endMs };
     }),
-    recentTrades: [...sniperStats.history, ...lemStats.history, ...fadeStats.history, ...stats.history]
-      .sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 50),
+    recentTrades: allTradeHistory.slice().sort((a, b) => (b.enteredAt ?? 0) - (a.enteredAt ?? 0)).slice(0, 500),
     pnlHistory:  pnlHistory.slice(-200),
     startBalance,
     analytics: _analytics,

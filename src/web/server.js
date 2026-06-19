@@ -77,7 +77,8 @@ const HTML = `<!DOCTYPE html>
   .chart-wrap{background:#111;border:1px solid #1e1e1e;border-radius:10px;overflow:hidden}
   .chart-header{padding:10px 16px;background:#161616;border-bottom:1px solid #1e1e1e;display:flex;align-items:center;justify-content:space-between}
   .chart-header-title{font-size:11px;font-weight:600;color:#888;letter-spacing:.6px;text-transform:uppercase}
-  .chart-body{padding:8px 4px 4px}
+  .chart-body{padding:0;position:relative}
+  .chart-tooltip{position:absolute;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:7px 10px;font-size:11px;color:#e0e0e0;pointer-events:none;display:none;white-space:nowrap;z-index:10;font-family:monospace}
 
   /* Sections */
   .section{background:#111;border:1px solid #1e1e1e;border-radius:10px;overflow:hidden}
@@ -161,8 +162,9 @@ const HTML = `<!DOCTYPE html>
       <span class="chart-header-title">Balance Over Time</span>
       <span id="chart-meta" style="font-size:11px;color:#555"></span>
     </div>
-    <div class="chart-body" id="chart-body">
-      <div class="empty">Collecting data...</div>
+    <div class="chart-body">
+      <canvas id="pnl-canvas" style="width:100%;display:block;cursor:crosshair"></canvas>
+      <div class="chart-tooltip" id="chart-tip"></div>
     </div>
   </div>
 
@@ -255,36 +257,130 @@ function stratTag(t) {
   return '<span class="tag lem">LEM</span>';
 }
 
-// ── P&L Chart ────────────────────────────────────────────────────────────────
-function pnlChart(history, startBal) {
-  if (!history || history.length < 3) return '<div class="empty" style="padding:30px">Collecting data — need a few more trades...</div>';
-  const W=800, H=130, px=12, py=18;
-  const iw=W-px*2, ih=H-py*2;
-  const vals=history.map(d=>d.v), times=history.map(d=>d.t);
-  const minV=Math.min(startBal*0.88,...vals), maxV=Math.max(startBal*1.12,...vals);
-  const minT=times[0], maxT=times[times.length-1];
-  const rv=maxV-minV||1, rt=maxT-minT||1;
-  const sx=t=>px+((t-minT)/rt)*iw, sy=v=>py+ih-((v-minV)/rv)*ih;
-  const lastV=vals[vals.length-1], color=lastV>=startBal?'#22c55e':'#ef4444';
-  const pts=history.map(d=>\`\${sx(d.t).toFixed(1)},\${sy(d.v).toFixed(1)}\`).join(' ');
-  const startY=sy(startBal).toFixed(1);
-  const areaD=\`M \${sx(times[0]).toFixed(1)},\${(py+ih).toFixed(1)} \${history.map(d=>\`L \${sx(d.t).toFixed(1)},\${sy(d.v).toFixed(1)}\`).join(' ')} L \${sx(maxT).toFixed(1)},\${(py+ih).toFixed(1)} Z\`;
-  const t0=new Date(minT).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-  const t1=new Date(maxT).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
-  return \`<svg viewBox="0 0 \${W} \${H}" style="width:100%;height:\${H}px;display:block">
-    <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="\${color}" stop-opacity="0.25"/>
-      <stop offset="100%" stop-color="\${color}" stop-opacity="0.02"/>
-    </linearGradient></defs>
-    <line x1="\${px}" y1="\${startY}" x2="\${W-px}" y2="\${startY}" stroke="#252525" stroke-width="1" stroke-dasharray="5,4"/>
-    <path d="\${areaD}" fill="url(#g)"/>
-    <polyline points="\${pts}" fill="none" stroke="\${color}" stroke-width="1.8" stroke-linejoin="round"/>
-    <circle cx="\${sx(maxT).toFixed(1)}" cy="\${sy(lastV).toFixed(1)}" r="4" fill="\${color}"/>
-    <text x="\${px+2}" y="\${Number(startY)-5}" fill="#444" font-size="10" font-family="monospace">$\${startBal.toFixed(0)}</text>
-    <text x="\${W-px-2}" y="\${Math.max(py+14,sy(lastV)-6)}" fill="\${color}" font-size="11" font-family="monospace" font-weight="bold" text-anchor="end">$\${lastV.toFixed(2)}</text>
-    <text x="\${px+2}" y="\${H-4}" fill="#333" font-size="9">\${t0}</text>
-    <text x="\${W-px-2}" y="\${H-4}" fill="#333" font-size="9" text-anchor="end">\${t1}</text>
-  </svg>\`;
+// ── Interactive P&L Canvas Chart ─────────────────────────────────────────────
+let _chartData = [], _chartStart = 100;
+
+function drawChart() {
+  const canvas = document.getElementById('pnl-canvas');
+  if (!canvas) return;
+  const data = _chartData, startBal = _chartStart;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth, H = 160;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const px = 52, pr = 14, pt = 14, pb = 24;
+  const iw = W - px - pr, ih = H - pt - pb;
+
+  if (!data || data.length < 2) {
+    ctx.fillStyle = '#444'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('Collecting data...', W/2, H/2); return;
+  }
+
+  const vals = data.map(d => d.v), times = data.map(d => d.t);
+  const minV = Math.min(startBal * 0.90, ...vals);
+  const maxV = Math.max(startBal * 1.10, ...vals);
+  const minT = times[0], maxT = times[times.length-1];
+  const rv = maxV - minV || 1, rt = maxT - minT || 1;
+  const sx = t => px + ((t - minT) / rt) * iw;
+  const sy = v => pt + ih - ((v - minV) / rv) * ih;
+  const lastV = vals[vals.length-1];
+  const color = lastV >= startBal ? '#22c55e' : '#ef4444';
+
+  // Grid lines
+  ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 1;
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const v = minV + (rv / steps) * i;
+    const y = sy(v);
+    ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(W - pr, y); ctx.stroke();
+    ctx.fillStyle = '#444'; ctx.font = '9px monospace'; ctx.textAlign = 'right';
+    ctx.fillText('$' + v.toFixed(0), px - 4, y + 3);
+  }
+
+  // Start balance reference line
+  const startY = sy(startBal);
+  ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(px, startY); ctx.lineTo(W - pr, startY); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Area fill
+  const grad = ctx.createLinearGradient(0, pt, 0, pt + ih);
+  grad.addColorStop(0, color + '40'); grad.addColorStop(1, color + '04');
+  ctx.beginPath();
+  ctx.moveTo(sx(times[0]), pt + ih);
+  data.forEach(d => ctx.lineTo(sx(d.t), sy(d.v)));
+  ctx.lineTo(sx(times[times.length-1]), pt + ih);
+  ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+
+  // Line
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.8;
+  ctx.lineJoin = 'round';
+  data.forEach((d, i) => i === 0 ? ctx.moveTo(sx(d.t), sy(d.v)) : ctx.lineTo(sx(d.t), sy(d.v)));
+  ctx.stroke();
+
+  // End dot
+  ctx.beginPath(); ctx.arc(sx(maxT), sy(lastV), 4, 0, Math.PI*2);
+  ctx.fillStyle = color; ctx.fill();
+
+  // Time labels
+  ctx.fillStyle = '#333'; ctx.font = '9px monospace'; ctx.textAlign = 'left';
+  ctx.fillText(new Date(minT).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}), px, H - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(new Date(maxT).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}), W - pr, H - 6);
+}
+
+function initChartInteraction() {
+  const canvas = document.getElementById('pnl-canvas');
+  const tip    = document.getElementById('chart-tip');
+  if (!canvas || canvas._interactive) return;
+  canvas._interactive = true;
+
+  function onMove(clientX, clientY) {
+    const data = _chartData;
+    if (!data || data.length < 2) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const px = 52, pr = 14;
+    const iw = rect.width - px - pr;
+    const times = data.map(d => d.t);
+    const minT = times[0], maxT = times[times.length-1];
+    const ratio = Math.max(0, Math.min(1, (mx - px) / iw));
+    const targetT = minT + ratio * (maxT - minT);
+    let closest = data[0];
+    for (const d of data) if (Math.abs(d.t - targetT) < Math.abs(closest.t - targetT)) closest = d;
+    const pnl = closest.v - _chartStart;
+    tip.style.display = 'block';
+    tip.innerHTML = \`<span style="color:#888">\${new Date(closest.t).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</span><br>
+      <span style="color:#fff;font-weight:600">$\${closest.v.toFixed(2)}</span>
+      <span style="color:\${pnl>=0?'#22c55e':'#ef4444'};margin-left:8px">\${pnl>=0?'+':''}\$\${pnl.toFixed(2)}</span>\`;
+    const tx = Math.min(mx + 12, rect.width - 140);
+    tip.style.left = tx + 'px';
+    tip.style.top = '10px';
+
+    // Redraw with crosshair
+    drawChart();
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    const H = 160, pt = 14, pb = 24, ih = H - pt - pb;
+    const vals = data.map(d => d.v);
+    const minV = Math.min(_chartStart * 0.90, ...vals), maxV = Math.max(_chartStart * 1.10, ...vals);
+    const rv = maxV - minV || 1;
+    const sy = v => pt + ih - ((v - minV) / rv) * ih;
+    const cx = px + ratio * iw, cy = sy(closest.v);
+    ctx.strokeStyle = '#444'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(cx, pt); ctx.lineTo(cx, H - pb); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI*2);
+    ctx.fillStyle = _chartStart <= closest.v ? '#22c55e' : '#ef4444'; ctx.fill();
+  }
+
+  canvas.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; drawChart(); });
+  canvas.addEventListener('touchmove', e => { e.preventDefault(); onMove(e.touches[0].clientX, e.touches[0].clientY); }, { passive: false });
+  canvas.addEventListener('touchend', () => { tip.style.display = 'none'; drawChart(); });
 }
 
 // ── Pagination state ─────────────────────────────────────────────────────────
@@ -421,13 +517,14 @@ function render(d) {
   \`;
 
   // ── P&L Chart ──
-  const history = d.pnlHistory ?? [];
-  const startBal = d.startBalance ?? 100;
-  document.getElementById('chart-body').innerHTML = pnlChart(history, startBal);
-  const lastV = history.length ? history[history.length-1].v : startBal;
-  const pct = ((lastV-startBal)/startBal*100);
+  _chartData  = d.pnlHistory ?? [];
+  _chartStart = d.startBalance ?? 100;
+  initChartInteraction();
+  drawChart();
+  const lastV = _chartData.length ? _chartData[_chartData.length-1].v : _chartStart;
+  const pct = (lastV - _chartStart) / _chartStart * 100;
   document.getElementById('chart-meta').textContent =
-    history.length >= 2 ? \`\${history.length} points · \${pct>=0?'+':''}\${pct.toFixed(1)}% from start\` : '';
+    _chartData.length >= 2 ? \`\${d.recentTrades?.length??0} trades · \${pct>=0?'+':''}\${pct.toFixed(1)}% all-time\` : '';
 
   // ── Active positions ──
   const positions = d.activePositions??[];
@@ -537,6 +634,7 @@ function render(d) {
 
 refresh();
 setInterval(refresh, 2000);
+window.addEventListener('resize', drawChart);
 </script>
 </body>
 </html>`;
