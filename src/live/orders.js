@@ -1,4 +1,4 @@
-import { Side, OrderType } from "@polymarket/clob-client";
+import { Side, OrderType, AssetType } from "@polymarket/clob-client";
 import { getClient } from "./client.js";
 
 export const LIVE = process.env.LIVE_MODE === "true";
@@ -68,10 +68,8 @@ export async function getUsdcBalance() {
   if (!LIVE) return null;
   const client = getClient();
   try {
-    const b = await client.getBalanceAllowance();
+    const b = await client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
     const raw = Number(b?.balance ?? 0);
-    // clob-client returns a normalized string like "100.00" — not raw micro-USDC
-    // If the value looks like raw micro-USDC (>10 000), divide by 1e6; otherwise use as-is
     return raw > 10_000 ? raw / 1e6 : raw;
   } catch {
     return null;

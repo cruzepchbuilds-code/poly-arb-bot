@@ -892,7 +892,7 @@ async function main() {
 
   startWebServer(() => ({
     mode:        LIVE ? "LIVE" : "SIM",
-    balance:     LIVE ? usdcBalance : simBalance,
+    balance:     LIVE ? (usdcBalance || simBalance) : simBalance,
     walletAddr,
     wsConnected: clobWs.connected,
     wsMarkets:   clobWs.marketCount,
