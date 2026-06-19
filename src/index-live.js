@@ -624,8 +624,7 @@ async function main() {
       const binanceOpenPrice = lateEntry.getOpenPrice(market.id);
       if (!binanceOpenPrice) continue;
       const tokenId    = triggerSide === "UP" ? market.upTokenId : market.downTokenId;
-      const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
-      const entryPrice = triggerSide === "UP" ? yesPrice : noPrice;
+      const entryPrice = clobWs.getAsk(tokenId);
       if (entryPrice == null || entryPrice > 0.85) continue;
 
       enteringMarkets.add(market.id);
@@ -672,8 +671,7 @@ async function main() {
         const binanceOpenPrice = lateEntry.getOpenPrice(market.id);
         if (!binanceOpenPrice) continue;
         const tokenId    = signal.side === "UP" ? market.upTokenId : market.downTokenId;
-        const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
-        const entryPrice = signal.side === "UP" ? yesPrice : noPrice;
+        const entryPrice = clobWs.getAsk(tokenId);
         if (entryPrice == null || entryPrice > 0.85) continue;
 
         enteringMarkets.add(market.id);

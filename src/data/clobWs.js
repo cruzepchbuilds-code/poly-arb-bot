@@ -62,6 +62,8 @@ export class ClobWsFeed {
   }
 
   getMid(tokenId)   { return this._prices.get(tokenId)?.mid ?? null; }
+  getAsk(tokenId)   { return this._prices.get(tokenId)?.ask ?? null; }
+  getBid(tokenId)   { return this._prices.get(tokenId)?.bid ?? null; }
   getAgeMs(tokenId) {
     const p = this._prices.get(tokenId);
     return p ? Date.now() - p.updatedAt : null;
