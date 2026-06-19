@@ -927,7 +927,7 @@ async function main() {
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }
-  if (LIVE && usdcBalance != null) simBalance = usdcBalance;
+  if (LIVE && usdcBalance != null && usdcBalance > 0) simBalance = usdcBalance;
 
   const runAnalysis = () => { try { _analytics = analyzeTrades(); } catch { /* ignore */ } };
   setInterval(runAnalysis, 5 * 60_000); // re-analyze every 5 min

@@ -69,7 +69,10 @@ export async function getUsdcBalance() {
   const client = getClient();
   try {
     const b = await client.getBalanceAllowance();
-    return Number(b?.balance ?? 0) / 1e6;  // USDC has 6 decimals
+    const raw = Number(b?.balance ?? 0);
+    // clob-client returns a normalized string like "100.00" — not raw micro-USDC
+    // If the value looks like raw micro-USDC (>10 000), divide by 1e6; otherwise use as-is
+    return raw > 10_000 ? raw / 1e6 : raw;
   } catch {
     return null;
   }
