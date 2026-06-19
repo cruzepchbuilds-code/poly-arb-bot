@@ -35,56 +35,48 @@ const fmtPx = (p, asset) => {
   return `$${p.toFixed(4)}`;
 };
 
-// Kraken symbols — no geo-restrictions unlike Binance
-const KRAKEN_SYMBOLS = {
-  BTC: "BTC/USD", ETH: "ETH/USD", SOL: "SOL/USD", XRP: "XRP/USD",
-  DOGE: "DOGE/USD", AVAX: "AVAX/USD", LINK: "LINK/USD", MATIC: "MATIC/USD",
+// Kraken REST pairs — polls all assets in one request every 2s
+const KRAKEN_PAIRS = {
+  BTC: "XBTUSD", ETH: "ETHUSD", SOL: "SOLUSD", XRP: "XRPUSD",
+  DOGE: "DOGEUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+};
+// Kraken returns these keys in the result object
+const KRAKEN_RESULT_KEYS = {
+  BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
+  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
 };
 
 function startPriceFeeds(assets) {
-  const prices    = {};
-  const symToAsset = {};
-  for (const a of assets) { if (KRAKEN_SYMBOLS[a]) symToAsset[KRAKEN_SYMBOLS[a]] = a; }
-  const symbols = Object.values(KRAKEN_SYMBOLS).filter((_, i) => assets.includes(Object.keys(KRAKEN_SYMBOLS)[i]));
+  const prices  = {};
+  let closed    = false;
+  let timer     = null;
 
-  let ws = null, closed = false, delay = 500;
+  const pairs = assets.map(a => KRAKEN_PAIRS[a]).filter(Boolean).join(",");
 
-  const connect = () => {
+  const poll = async () => {
     if (closed) return;
-    ws = new WebSocket("wss://ws.kraken.com/v2");
-    ws.on("open", () => {
-      delay = 500;
-      ws.send(JSON.stringify({ method: "subscribe", params: { channel: "ticker", symbol: symbols } }));
-    });
-    ws.on("message", (buf) => {
-      try {
-        const msg = JSON.parse(buf.toString());
-        if (msg.channel === "ticker" && Array.isArray(msg.data)) {
-          for (const d of msg.data) {
-            const asset = symToAsset[d.symbol];
-            if (!asset) continue;
-            const p = Number(d.last);
-            if (Number.isFinite(p) && p > 0) prices[asset] = p;
-          }
-        }
-      } catch { /* ignore */ }
-    });
-    const retry = () => {
-      if (closed) return;
-      try { ws?.terminate(); } catch { /* ignore */ }
-      const w = delay; delay = Math.min(30_000, Math.floor(delay * 1.5));
-      setTimeout(connect, w);
-    };
-    ws.on("close", retry);
-    ws.on("error", retry);
+    try {
+      const res = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${pairs}`,
+        { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (json.error?.length) return;
+      for (const asset of assets) {
+        const key = KRAKEN_RESULT_KEYS[asset];
+        const data = json.result?.[key] ?? json.result?.[KRAKEN_PAIRS[asset]];
+        if (!data) continue;
+        const p = Number(data.c?.[0]); // c = last trade closed [price, lot volume]
+        if (Number.isFinite(p) && p > 0) prices[asset] = p;
+      }
+    } catch { /* ignore timeouts */ }
+    if (!closed) timer = setTimeout(poll, 2_000);
   };
-  connect();
+  poll();
 
-  // Return per-asset feed objects matching existing interface
   return Object.fromEntries(assets.map(a => [a, {
-    get:           () => prices[a] ?? null,
-    getVolPressure: () => 0.5, // neutral — Kraken ticker doesn't split buy/sell volume
-    close:         () => { closed = true; try { ws?.close(); } catch { /* ignore */ } },
+    get:            () => prices[a] ?? null,
+    getVolPressure: () => 0.5,
+    close:          () => { closed = true; clearTimeout(timer); },
   }]));
 }
 

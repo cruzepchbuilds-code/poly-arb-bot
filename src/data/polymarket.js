@@ -21,14 +21,16 @@ export async function fetchAll5minMarkets() {
 
   try {
     const urls = [
-      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=100`,
-      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=100&tag_slug=crypto`,
-      `${CONFIG.gammaBaseUrl}/events?active=true&limit=50`,
+      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200`,
+      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200&tag_slug=crypto`,
+      `${CONFIG.gammaBaseUrl}/events?active=true&limit=100`,
+      `${CONFIG.gammaBaseUrl}/events?active=true&limit=100&tag_slug=crypto`,
+      `${CONFIG.gammaBaseUrl}/markets?active=true&limit=200&closed=false`,
     ];
 
     for (const url of urls) {
       try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) continue;
         const data = await res.json();
         const markets = extractMarkets(data);
