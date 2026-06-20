@@ -1815,36 +1815,40 @@ async function main() {
       }
     }
 
+    // Cap concurrent open MR positions to avoid over-committing capital on-chain
+    if (_mrOrders.size >= 20) return;
+
     for (const market of marketList) {
+      if (_mrOrders.size >= 20) break;
       const wm = market.windowMins ?? 5;
-      if (wm > 15) continue;
+      if (wm > 20) continue;
       const remaining = market.endMs - now;
-      if (remaining < 90_000 || remaining > wm * 55_000) continue; // need ≥90s
+      if (remaining < 60_000 || remaining > wm * 55_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (_mrOrders.has(market.id)) continue;
 
       const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
       if (!yesPrice || !noPrice) continue;
-      // Must be near 50/50 — if it's directional, skip (adverse selection risk)
-      if (Math.abs(yesPrice - 0.50) > 0.05 || Math.abs(noPrice - 0.50) > 0.05) continue;
+      // ±10¢ from 50/50 — still genuinely two-sided, adverse selection risk stays low
+      if (Math.abs(yesPrice - 0.50) > 0.10 || Math.abs(noPrice - 0.50) > 0.10) continue;
 
-      // Skip if any signal says market is NOT 50/50
-      const oiDelta = getOIDelta(market.asset, 120_000);
-      if (oiDelta !== null && Math.abs(oiDelta) > 0.003) continue;
+      // Only block on extreme volume (genuine panic move, not routine flow)
       const spike = getVolumeSpike(market.asset);
-      if (spike !== null && spike > 2.5) continue;
+      if (spike !== null && spike > 4.0) continue;
+
+      // Only block on very large, very fresh whale flows that clearly dominate the market
       const whale = getWhaleSignal(market.asset);
-      if (whale) continue; // active whale signal → skip, market may be directional
+      if (whale && (whale.usdTotal ?? 0) > 5_000_000 && (whale.ageMs ?? Infinity) < 5 * 60_000) continue;
 
       const upBid = clobWs.getBid(market.upTokenId);
       const dnBid = clobWs.getBid(market.downTokenId);
       if (!upBid || !dnBid) continue;
 
-      // Total cost if both fill: upBid + dnBid < 1.00 → guaranteed profit at settlement
-      if (upBid + dnBid >= 0.98) continue; // need at least 2¢ margin (rebate covers the rest)
+      // 0.99 threshold: maker rebate (0.45% per side ≈ 0.9¢ per $1) covers the gap
+      if (upBid + dnBid >= 0.99) continue;
 
       const betSize = dynamicBetSize(market.asset, 0.05, 1.0);
-      if (betSize < CONFIG.minBetUsdc * 2) continue; // need enough for both sides
+      if (betSize < CONFIG.minBetUsdc * 2) continue;
       const halfBet = betSize / 2;
 
       try {
@@ -1853,10 +1857,11 @@ async function main() {
         try {
           const dnOrder = await placeLimitBuy(market.downTokenId, dnBid, Math.floor(halfBet / dnBid));
           _mrOrders.set(market.id, { upOrder, dnOrder, asset: market.asset, placedAt: now });
+          console.error(`[mr] ${market.asset} ORDERS PLACED  up@${upBid.toFixed(3)} dn@${dnBid.toFixed(3)}  sum=${(upBid+dnBid).toFixed(3)}  ${Math.round(remaining/1000)}s left`);
         } catch {
-          await co(upOrder?.orderId).catch(() => {}); // cancel upOrder to avoid orphaned open order
+          await co(upOrder?.orderId).catch(() => {});
         }
-      } catch { /* import or upOrder placement failed — skip */ }
+      } catch { /* import or order placement failed — skip */ }
     }
   };
 
@@ -2130,7 +2135,7 @@ async function main() {
   setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
   setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — extreme funding rate squeeze
   setInterval(clobImbalanceCheck,    500); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
-  setInterval(makerRebateCheck,   30_000); // TIER 5 — market-neutral maker rebate farming
+  setInterval(makerRebateCheck,   10_000); // TIER 5 — market-neutral maker rebate farming
   setInterval(makerRebateMonitor,  5_000); // MR fill checker
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
