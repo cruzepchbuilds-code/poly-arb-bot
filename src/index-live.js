@@ -559,11 +559,24 @@ async function main() {
   const _osEntered       = new Set();  // prevent double-entering same expired market
   const expiredMarketBuf = new Map();  // marketId → market (keeps expired markets for OS scanning)
   const _mrOrders        = new Map();  // marketId → { upOrder, dnOrder, asset, placedAt }
+  const _confluentMarkets = new Map(); // marketId → { lbTs, side } for confluence detection
 
   // Per-asset CLOB liquidity cap — prevents pushing thin markets
   const ASSET_CLOB_CAP = {
     BTC: 5000, ETH: 5000, SOL: 3000,
     XRP: 2500, DOGE: 2000, AVAX: 1500, LINK: 1500, MATIC: 1500,
+  };
+
+  // Per-asset OracleSnipe staleness window + delta floor (thin assets stay stale far longer)
+  const OS_TIER = {
+    BTC:  { maxMsPost:  5 * 60_000, minDelta: 0.005 },
+    ETH:  { maxMsPost:  7 * 60_000, minDelta: 0.005 },
+    SOL:  { maxMsPost: 15 * 60_000, minDelta: 0.004 },
+    XRP:  { maxMsPost: 25 * 60_000, minDelta: 0.003 },
+    DOGE: { maxMsPost: 25 * 60_000, minDelta: 0.003 },
+    AVAX: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
+    LINK: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
+    MATIC:{ maxMsPost: 60 * 60_000, minDelta: 0.001 },
   };
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
@@ -1213,7 +1226,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 45_000 || remaining > 150_000) continue;
+      if (remaining < 50_000 || remaining > 120_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -1223,7 +1236,9 @@ async function main() {
       if (!openPrice) continue;
 
       const delta = (currentPrice - openPrice) / openPrice;
-      if (Math.abs(delta) < 0.005) continue;  // need ≥0.5% confirmed Binance move
+      // Delta threshold scales with time left: more time = more chance of reversal
+      const minDelta = remaining > 100_000 ? 0.010 : remaining > 70_000 ? 0.007 : 0.005;
+      if (Math.abs(delta) < minDelta) continue;
 
       const side    = delta > 0 ? "UP" : "DOWN";
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
@@ -1254,9 +1269,14 @@ async function main() {
       const whale = getWhaleSignal(market.asset);
       const whaleMult = (whale && whale.direction === side && whale.ageMs < 30 * 60_000) ? 1.15 : 1.0;
 
-      const betSize = dynamicBetSize(market.asset, 0.20,
+      // Cap combined multiplier at 2.0× to prevent runaway bet sizes
+      const combinedMult = Math.min(2.0,
         adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() * oiMult * spikeMult * eventMult * whaleMult);
+      const betSize = dynamicBetSize(market.asset, 0.20, combinedMult);
       if (betSize < CONFIG.minBetUsdc) continue;
+
+      // Record for confluence detection (CI firing on same market within 3s = stronger signal)
+      _confluentMarkets.set(market.id, { lbTs: now, side });
 
       simBalance -= betSize;
       _reservedUsdc += betSize;
@@ -1317,14 +1337,15 @@ async function main() {
       if (activePositions.has(id) || enteringMarkets.has(id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
-      // UMA dispute window: up to 2 hours. Stale orders typically persist 1-30 min on thin assets.
-      if (now - market.endMs > 90 * 60_000) continue;
+      // Asset-tiered staleness window: BTC/ETH LPs reprice in 2-7 min; AVAX/LINK/MATIC take 45-60 min
+      const osTier = OS_TIER[market.asset] ?? { maxMsPost: 30 * 60_000, minDelta: 0.003 };
+      if (now - market.endMs > osTier.maxMsPost) continue;
 
       const snap = _closeSnaps.get(id);
       if (!snap) continue;
 
       const delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
-      if (Math.abs(delta) < 0.003) continue; // need ≥0.3% confirmed Binance move
+      if (Math.abs(delta) < osTier.minDelta) continue;
 
       const side    = delta > 0 ? "UP" : "DOWN";
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
@@ -1395,7 +1416,8 @@ async function main() {
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask > 0.58) continue; // market hasn't priced the squeeze yet
+      const extremeFunding = Math.abs(f.rate) > 0.0008; // 2× threshold = near-certain squeeze
+      if (ask == null || ask > (extremeFunding ? 0.62 : 0.58)) continue;
 
       // OI must also be elevated — confirms crowded position, not just noise
       const oiDelta = getOIDelta(market.asset, 300_000); // 5-minute OI window
@@ -1447,8 +1469,12 @@ async function main() {
   // buyers are accumulating before a reprice. Enter BEFORE the CLOB adjusts.
   // No Binance data needed — pure order-book microstructure signal.
   const _ciEntered = new Set();
+  let _isCiRunning = false;
   const clobImbalanceCheck = async () => {
+    if (_isCiRunning) return;
+    _isCiRunning = true;
     const now = Date.now();
+    try {
     for (const market of marketList) {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
@@ -1470,7 +1496,12 @@ async function main() {
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask > 0.65) continue; // must be underpriced — imbalance hasn't repriced yet
+
+      // Confluence: LB fired on this market in the last 3s with matching direction
+      const conf = _confluentMarkets.get(market.id);
+      const isConfluent = conf?.side === side && (now - (conf?.lbTs ?? 0)) < 3_000;
+      const askCap = isConfluent ? 0.75 : 0.65;
+      if (ask == null || ask > askCap) continue;
 
       // Cross-validate: buy pressure must align with imbalance direction
       const bp = getBuyPressure(market.asset);
@@ -1479,8 +1510,11 @@ async function main() {
         if (side === "DOWN" && bp > 0.52) continue;
       }
 
+      // Scale bet with imbalance strength + confluence boost
+      const imbMult = imbalance > 0.90 ? 1.5 : imbalance > 0.85 ? 1.25 : 1.0;
+      const confluenceMult = isConfluent ? 1.4 : 1.0;
       const betSize = dynamicBetSize(market.asset, 0.08,
-        adaptive.getMultiplier(market.asset, "CLOBIMB") * getTimeMultiplier());
+        adaptive.getMultiplier(market.asset, "CLOBIMB") * getTimeMultiplier() * imbMult * confluenceMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _ciEntered.add(market.id);
@@ -1496,19 +1530,21 @@ async function main() {
             id: market.id, asset: market.asset,
             side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
           });
-          pos.clobImb     = true;
+          pos.clobImb      = true;
           pos.clobImbRatio = imbalance;
+          pos.ciConfluent  = isConfluent;
           const entered = await pos.enter(ask, betSize);
           if (entered) {
             simBalance += betSize - (pos.totalSpent ?? 0);
             activePositions.set(market.id, pos);
             ciStats.entered++;
-            console.error(`[ci] ${market.asset} ${side} @${ask.toFixed(3)}  imb=${(imbalance * 100).toFixed(0)}%  $${betSize.toFixed(2)}`);
+            console.error(`[ci] ${market.asset} ${side} @${ask.toFixed(3)}  imb=${(imbalance * 100).toFixed(0)}%  $${betSize.toFixed(2)}${isConfluent ? "  CONFLUENCE" : ""}`);
           } else { simBalance += betSize; _ciEntered.delete(market.id); }
         } catch { simBalance += betSize; _ciEntered.delete(market.id); }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
       })();
     }
+    } finally { _isCiRunning = false; }
   };
 
   // ── Strategy: Maker Rebate Farming ───────────────────────────────────────
@@ -1559,11 +1595,15 @@ async function main() {
       const halfBet = betSize / 2;
 
       try {
-        const { placeLimitBuy } = await import("./live/orders.js");
+        const { placeLimitBuy, cancelOrder: co } = await import("./live/orders.js");
         const upOrder = await placeLimitBuy(market.upTokenId, upBid, Math.floor(halfBet / upBid));
-        const dnOrder = await placeLimitBuy(market.downTokenId, dnBid, Math.floor(halfBet / dnBid));
-        _mrOrders.set(market.id, { upOrder, dnOrder, asset: market.asset, placedAt: now });
-      } catch { /* failed to place — skip */ }
+        try {
+          const dnOrder = await placeLimitBuy(market.downTokenId, dnBid, Math.floor(halfBet / dnBid));
+          _mrOrders.set(market.id, { upOrder, dnOrder, asset: market.asset, placedAt: now });
+        } catch {
+          await co(upOrder?.orderId).catch(() => {}); // cancel upOrder to avoid orphaned open order
+        }
+      } catch { /* import or upOrder placement failed — skip */ }
     }
   };
 
@@ -1595,7 +1635,7 @@ async function main() {
         // Track as a simple profit event (don't need full position tracking since outcome is known).
         const upShares = mr.upOrder.size ?? 0;
         const dnShares = mr.dnOrder.size ?? 0;
-        const payout = Math.max(upShares, dnShares) * 1.0; // whichever side wins pays out
+        const payout = ((upShares + dnShares) / 2) * 1.0; // expected value in a 50/50 market
         simBalance += payout;
         const net = payout - spent;
         mrStats.totalSpent  += spent;
@@ -1806,7 +1846,7 @@ async function main() {
   setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
   setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
   setInterval(fundingSnipeCheck, 30_000);  // TIER 3 — extreme funding rate squeeze
-  setInterval(clobImbalanceCheck,  5_000); // TIER 4 — CLOB order book imbalance
+  setInterval(clobImbalanceCheck,  1_000); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
   setInterval(makerRebateCheck,   60_000); // TIER 5 — market-neutral maker rebate farming
   setInterval(makerRebateMonitor,  5_000); // MR fill checker
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
