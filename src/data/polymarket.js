@@ -173,13 +173,13 @@ let _broadCache = [];
 let _broadCachedAt = 0;
 
 export async function fetchAllBinaryMarkets() {
-  if (Date.now() - _broadCachedAt < 15_000) return _broadCache;
+  if (Date.now() - _broadCachedAt < 8_000) return _broadCache;
 
   const now = Date.now();
   const all = [];
 
   // Fetch 2 pages for broader coverage
-  for (let offset = 0; offset <= 200; offset += 200) {
+  for (let offset = 0; offset <= 400; offset += 200) {
     try {
       const res = await fetch(
         `${CONFIG.gammaBaseUrl}/markets?active=true&closed=false&limit=200&offset=${offset}`,

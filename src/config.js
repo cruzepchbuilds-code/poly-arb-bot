@@ -40,7 +40,7 @@ export const CONFIG = {
   maxBetPct:        0.08,
 
   maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || null,
-  maxPositions: Number(process.env.MAX_POSITIONS) || 15,
+  maxPositions: Number(process.env.MAX_POSITIONS) || 40,
 
   earlyExitMinPrice: 0.88,
   earlyExitMaxSecs:  25,

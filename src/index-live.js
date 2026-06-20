@@ -1303,7 +1303,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 40_000 || remaining > 130_000) continue;
+      if (remaining < 30_000 || remaining > 150_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -1399,7 +1399,7 @@ async function main() {
       if (wm > 15) continue;
       const marketStartMs = market.endMs - wm * 60_000;
       const ageMs = now - marketStartMs;
-      if (ageMs < 5_000 || ageMs > 25_000) continue; // 5-25s into market life
+      if (ageMs < 3_000 || ageMs > 35_000) continue; // 3-35s into market life
       if (_opsEntered.has(market.id)) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
