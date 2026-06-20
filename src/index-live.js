@@ -2360,7 +2360,7 @@ async function main() {
   // setInterval(openingPriceSnipe,    500);  // TIER 0 — paused
   // setInterval(oracleSnipeCheck,     500);  // TIER 1 — paused
   // setInterval(_pollGammaResolutions, 3_000); // paused (used by OracleSnipe)
-  // setInterval(latencyBondCheck,     500);  // TIER 2 — paused
+  setInterval(latencyBondCheck,     500);  // TIER 2 — re-enabled, now on live Binance WS feed
   setInterval(() => { clobWs.setThreshold(getThreshold()); clobWs.setMakerThreshold(CONFIG.makerArbThreshold); }, 10_000);
   // setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — paused
   // setInterval(clobImbalanceCheck,    500); // TIER 4 — paused
