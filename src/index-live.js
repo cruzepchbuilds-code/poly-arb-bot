@@ -1410,12 +1410,23 @@ async function main() {
       if (!openPrice) continue;
 
       const delta = (currentPrice - openPrice) / openPrice;
-      if (Math.abs(delta) < 0.003) continue; // need ≥0.3% Binance move since open
+      if (Math.abs(delta) < 0.008) continue; // need ≥0.8% Binance move since open
 
       const side    = delta > 0 ? "UP" : "DOWN";
+
+      // Require 60s trend to confirm the direction — filters out tick noise
+      const snaps60 = fastSnaps[market.asset];
+      if (snaps60 && snaps60.length >= 12) {
+        const old60   = snaps60[Math.max(0, snaps60.length - 12)]; // ~60s ago
+        const cur60   = snaps60[snaps60.length - 1];
+        const delta60 = (cur60.price - old60.price) / old60.price;
+        if (side === "UP"   && delta60 <= 0.002) continue; // 60s not bullish enough
+        if (side === "DOWN" && delta60 >= -0.002) continue; // 60s not bearish enough
+      }
+
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask > 0.55) continue; // CLOB must still be near 50/50
+      if (ask == null || ask > 0.52) continue; // CLOB must be near 50/50 (tighter than before)
 
       // Volume not collapsing
       const spike = getVolumeSpike(market.asset);
