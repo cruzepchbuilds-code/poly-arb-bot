@@ -5,7 +5,7 @@
 
 import WebSocket from "ws";
 import { CONFIG } from "./config.js";
-import { fetchAll5minMarkets, fetchArbCandidates, fetchClobMidPrices } from "./data/polymarket.js";
+import { fetchAllBinaryMarkets, fetchClobMidPrices } from "./data/polymarket.js";
 import { ClobWsFeed } from "./data/clobWs.js";
 import { logTrade, loadTrades } from "./data/logger.js";
 import { loadSimState, saveSimState } from "./data/simState.js";
@@ -50,13 +50,21 @@ const fmtPx = (p, asset) => {
 
 // Kraken REST pairs — polls all assets in one request every 2s
 const KRAKEN_PAIRS = {
-  BTC: "XBTUSD", ETH: "ETHUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
-  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  BTC: "XBTUSD",    ETH: "ETHUSD",   SOL: "SOLUSD",   XRP: "XXRPZUSD",
+  DOGE: "XDGUSD",  AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  BNB: "BNBUSD",   ADA: "ADAUSD",   DOT: "DOTUSD",   TRX: "TRXUSD",
+  TON: "TONUSD",   SHIB: "SHIBUSD", PEPE: "PEPEUSD", UNI: "UNIUSD",
+  ATOM: "ATOMUSD", NEAR: "NEARUSD", APT: "APTUSD",   SUI: "SUIUSD",
+  ARB: "ARBUSD",   OP: "OPUSD",     INJ: "INJUSD",
 };
 // Kraken returns these keys in the result object
 const KRAKEN_RESULT_KEYS = {
-  BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD", XRP: "XXRPZUSD",
-  DOGE: "XDGUSD", AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  BTC: "XXBTZUSD",  ETH: "XETHZUSD", SOL: "SOLUSD",   XRP: "XXRPZUSD",
+  DOGE: "XDGUSD",  AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
+  BNB: "BNBUSD",   ADA: "ADAUSD",   DOT: "DOTUSD",   TRX: "TRXUSD",
+  TON: "TONUSD",   SHIB: "SHIBUSD", PEPE: "PEPEUSD", UNI: "UNIUSD",
+  ATOM: "ATOMUSD", NEAR: "NEARUSD", APT: "APTUSD",   SUI: "SUIUSD",
+  ARB: "ARBUSD",   OP: "OPUSD",     INJ: "INJUSD",
 };
 
 function startPriceFeeds(assets) {
@@ -616,6 +624,24 @@ async function main() {
     AVAX: { maxMsPost: 50 * 60_000, minDelta: 0.002 },
     LINK: { maxMsPost: 50 * 60_000, minDelta: 0.002 },
     MATIC:{ maxMsPost: 67 * 60_000, minDelta: 0.001 },
+    // New assets — moderate-liquidity tier
+    BNB:  { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    ADA:  { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    DOT:  { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    TRX:  { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    UNI:  { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    ATOM: { maxMsPost: 20 * 60_000, minDelta: 0.003 },
+    // New assets — lower-liquidity tier
+    TON:  { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    NEAR: { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    APT:  { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    SUI:  { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    ARB:  { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    OP:   { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    INJ:  { maxMsPost: 30 * 60_000, minDelta: 0.003 },
+    // Meme tokens — very wide staleness window
+    SHIB: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
+    PEPE: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
   };
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
@@ -792,29 +818,29 @@ async function main() {
   startResearchAgent();
 
   const refreshMarkets = async () => {
-    let markets = [];
-    try { markets = await fetchAll5minMarkets(); } catch { return; }
-    for (const market of markets) {
+    let all = [];
+    try { all = await fetchAllBinaryMarkets(); } catch { return; }
+    const knownAssets = new Set(CONFIG.assets);
+    const now = Date.now();
+
+    const fresh = [];
+    const arbFresh = [];
+    const seen = new Set();
+    for (const m of all) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      if (knownAssets.has(m.asset)) fresh.push(m);
+      else arbFresh.push(m);
+    }
+
+    for (const market of fresh) {
       const openPx = feeds[market.asset]?.get() ?? null;
       lateEntry.recordOpen(market.id, openPx);
-      sniper.recordOpen(market.id, openPx);
-      fade.recordOpen(market.id, openPx);
+      try { fade.recordOpen(market.id, openPx); } catch { /* ignore */ }
     }
-    clobWs.addMarkets(markets);
-    marketList = markets;
-
-    // Broader ARB scan — subscribe any binary market with a pricing gap
-    try {
-      const arbCandidates = await fetchArbCandidates();
-      const now = Date.now();
-      const existingIds = new Set(marketList.map(m => m.id));
-      const fresh = arbCandidates.filter(m => !existingIds.has(m.id));
-      clobWs.addMarkets(fresh);
-      // Merge in, drop expired, deduplicate
-      const combined = [...arbMarketList, ...fresh];
-      const seen = new Set();
-      arbMarketList = combined.filter(m => m.endMs > now && !seen.has(m.id) && seen.add(m.id));
-    } catch { /* ignore */ }
+    clobWs.addMarkets([...fresh, ...arbFresh]);
+    marketList = fresh;
+    arbMarketList = arbFresh.filter(m => m.endMs > now);
   };
 
   const fallbackScan = async () => {

@@ -49,6 +49,21 @@ const ASSET_KEYWORDS = {
   AVAX:  ["avax", "avalanche"],
   LINK:  ["link", "chainlink"],
   MATIC: ["matic", "polygon", "pol"],
+  BNB:   ["bnb", "binancecoin", "binance coin"],
+  ADA:   ["ada", "cardano"],
+  DOT:   ["dot", "polkadot"],
+  TRX:   ["trx", "tron"],
+  TON:   ["ton", "toncoin"],
+  SHIB:  ["shib", "shiba"],
+  PEPE:  ["pepe"],
+  UNI:   ["uni", "uniswap"],
+  ATOM:  ["atom", "cosmos"],
+  NEAR:  ["near"],
+  APT:   ["apt", "aptos"],
+  SUI:   ["sui"],
+  ARB:   ["arb", "arbitrum"],
+  OP:    ["op", "optimism"],
+  INJ:   ["inj", "injective"],
 };
 
 function _detectAsset(text) {

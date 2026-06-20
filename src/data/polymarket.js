@@ -12,26 +12,56 @@ function safeTimeMs(v) {
 }
 
 const ASSET_PREFIXES = {
-  BTC:  ["btc"],
-  ETH:  ["eth"],
-  SOL:  ["sol"],
-  XRP:  ["xrp"],
-  DOGE: ["doge"],
-  AVAX: ["avax"],
-  LINK: ["link"],
-  MATIC: ["matic", "pol"],
+  BTC:  ["btc", "bitcoin"],
+  ETH:  ["eth", "ethereum"],
+  SOL:  ["sol", "solana"],
+  XRP:  ["xrp", "ripple"],
+  DOGE: ["doge", "dogecoin"],
+  AVAX: ["avax", "avalanche"],
+  LINK: ["link", "chainlink"],
+  MATIC: ["matic", "pol", "polygon"],
+  BNB:  ["bnb", "binancecoin"],
+  ADA:  ["ada", "cardano"],
+  DOT:  ["dot", "polkadot"],
+  TRX:  ["trx", "tron"],
+  TON:  ["ton", "toncoin"],
+  SHIB: ["shib", "shibainu"],
+  PEPE: ["pepe"],
+  UNI:  ["uni", "uniswap"],
+  ATOM: ["atom", "cosmos"],
+  NEAR: ["near"],
+  APT:  ["apt", "aptos"],
+  SUI:  ["sui"],
+  ARB:  ["arb", "arbitrum"],
+  OP:   ["op", "optimism"],
+  INJ:  ["inj", "injective"],
 };
 
 function detectAsset(text) {
   const q = String(text || "").toLowerCase();
-  if (q.includes("bitcoin")   || q.includes("btc"))  return "BTC";
-  if (q.includes("ethereum")  || q.includes("eth"))  return "ETH";
-  if (q.includes("solana")    || q.includes("sol"))  return "SOL";
-  if (q.includes("ripple")    || q.includes("xrp"))  return "XRP";
-  if (q.includes("dogecoin")  || q.includes("doge")) return "DOGE";
-  if (q.includes("avalanche") || q.includes("avax")) return "AVAX";
-  if (q.includes("chainlink") || q.includes("link")) return "LINK";
-  if (q.includes("polygon")   || q.includes("matic"))return "MATIC";
+  if (q.includes("bitcoin")     || q.match(/\bbtc\b/))      return "BTC";
+  if (q.includes("ethereum")    || q.match(/\beth\b/))      return "ETH";
+  if (q.includes("solana")      || q.match(/\bsol\b/))      return "SOL";
+  if (q.includes("ripple")      || q.match(/\bxrp\b/))      return "XRP";
+  if (q.includes("dogecoin")    || q.match(/\bdoge\b/))     return "DOGE";
+  if (q.includes("avalanche")   || q.match(/\bavax\b/))     return "AVAX";
+  if (q.includes("chainlink")   || q.match(/\blink\b/))     return "LINK";
+  if (q.includes("polygon")     || q.match(/\bmatic\b/) || q.match(/\bpol\b/)) return "MATIC";
+  if (q.includes("binancecoin") || q.match(/\bbnb\b/))      return "BNB";
+  if (q.includes("cardano")     || q.match(/\bada\b/))      return "ADA";
+  if (q.includes("polkadot")    || q.match(/\bdot\b/))      return "DOT";
+  if (q.includes("tron")        || q.match(/\btrx\b/))      return "TRX";
+  if (q.includes("toncoin")     || q.match(/\bton\b/))      return "TON";
+  if (q.includes("shiba")       || q.match(/\bshib\b/))     return "SHIB";
+  if (q.match(/\bpepe\b/))                                   return "PEPE";
+  if (q.includes("uniswap")     || q.match(/\buni\b/))      return "UNI";
+  if (q.includes("cosmos")      || q.match(/\batom\b/))     return "ATOM";
+  if (q.match(/\bnear\b/))                                   return "NEAR";
+  if (q.includes("aptos")       || q.match(/\bapt\b/))      return "APT";
+  if (q.match(/\bsui\b/))                                    return "SUI";
+  if (q.includes("arbitrum")    || q.match(/\barb\b/))      return "ARB";
+  if (q.includes("optimism")    || q.match(/\bop\b/))       return "OP";
+  if (q.includes("injective")   || q.match(/\binj\b/))      return "INJ";
   return "GENERAL";
 }
 
@@ -136,6 +166,99 @@ export async function fetchAll5minMarkets() {
   return _marketsCache;
 }
 
+// ── Broad binary market scan (primary discovery) ─────────────────────────────
+// Replaces the slug-based approach as the primary feed; covers all 23 assets.
+
+let _broadCache = [];
+let _broadCachedAt = 0;
+
+export async function fetchAllBinaryMarkets() {
+  if (Date.now() - _broadCachedAt < 15_000) return _broadCache;
+
+  const now = Date.now();
+  const all = [];
+
+  // Fetch 2 pages for broader coverage
+  for (let offset = 0; offset <= 200; offset += 200) {
+    try {
+      const res = await fetch(
+        `${CONFIG.gammaBaseUrl}/markets?active=true&closed=false&limit=200&offset=${offset}`,
+        { signal: AbortSignal.timeout(10_000) }
+      );
+      if (!res.ok) break;
+      const data = await res.json();
+      const page = Array.isArray(data) ? data : (data.markets ?? []);
+      all.push(...page);
+      if (page.length < 200) break;
+    } catch { break; }
+  }
+
+  // Also supplement with slug-based lookup for known assets (reliability fallback)
+  const nowSec = Math.floor(now / 1000);
+  const end5  = Math.ceil(nowSec / 300) * 300;
+  const end10 = Math.ceil(nowSec / 600) * 600;
+  const windows5m  = [end5,  end5  + 300, end5  + 600];
+  const windows10m = [end10, end10 + 600, end10 + 1200];
+  const slugFetches = [];
+  for (const [asset, prefixes] of Object.entries(ASSET_PREFIXES)) {
+    for (const prefix of prefixes.slice(0, 1)) { // only first prefix per asset
+      for (const w of windows5m)  slugFetches.push({ asset, slug: `${prefix}-updown-5m-${w}`,  windowEndMs: w * 1000, windowMins: 5  });
+      for (const w of windows10m) slugFetches.push({ asset, slug: `${prefix}-updown-10m-${w}`, windowEndMs: w * 1000, windowMins: 10 });
+    }
+  }
+  const slugResults = await Promise.allSettled(
+    slugFetches.map(({ asset, slug, windowEndMs, windowMins }) =>
+      fetchEventBySlug(slug).then(events =>
+        events.flatMap(ev => (ev.markets ?? []).flatMap(m => {
+          const n = normalizeSlugMarket(m, asset, windowEndMs, windowMins);
+          return n ? [n] : [];
+        }))
+      )
+    )
+  );
+  const slugMarkets = slugResults.flatMap(r => r.status === "fulfilled" ? r.value : []);
+
+  // Normalize broad scan results
+  const broadMarkets = [];
+  for (const m of all) {
+    const tokens = getTokenIds(m);
+    if (!tokens.upTokenId || !tokens.downTokenId) continue;
+    const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
+    if (!endMs || endMs <= now + 30_000 || endMs > now + 90 * 60_000) continue;
+    const asset = detectAsset(m.question || m.title);
+    let initialYes = null, initialNo = null;
+    try {
+      const prices = JSON.parse(m.outcomePrices ?? "[]");
+      const p0 = Number(prices[0]), p1 = Number(prices[1]);
+      if (Number.isFinite(p0)) initialYes = p0;
+      if (Number.isFinite(p1)) initialNo  = p1;
+    } catch { /* ignore */ }
+    broadMarkets.push({
+      id:          m.conditionId || m.id || tokens.upTokenId,
+      asset,
+      question:    String(m.question || m.title || "Unknown").slice(0, 80),
+      windowMins:  Math.max(1, Math.round((endMs - now) / 60_000)),
+      upTokenId:   tokens.upTokenId,
+      downTokenId: tokens.downTokenId,
+      endMs,
+      initialYes,
+      initialNo,
+    });
+  }
+
+  // Merge broad + slug, deduplicate by id
+  const seen = new Set();
+  const merged = [...broadMarkets, ...slugMarkets].filter(m => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+
+  _broadCache = merged;
+  _broadCachedAt = now;
+  return merged;
+}
+
 async function fetchEventBySlug(slug) {
   try {
     const res = await fetch(
@@ -158,55 +281,8 @@ let _arbCache = [];
 let _arbCachedAt = 0;
 
 export async function fetchArbCandidates() {
-  if (Date.now() - _arbCachedAt < 60_000) return _arbCache;
-
-  const now = Date.now();
-  const results = [];
-
-  try {
-    const res = await fetch(
-      `${CONFIG.gammaBaseUrl}/markets?active=true&closed=false&limit=200`,
-      { signal: AbortSignal.timeout(10_000) }
-    );
-    if (!res.ok) return _arbCache;
-    const data = await res.json();
-    const markets = Array.isArray(data) ? data : (data.markets ?? []);
-
-    for (const m of markets) {
-      const tokens = getTokenIds(m);
-      if (!tokens.upTokenId || !tokens.downTokenId) continue;
-
-      const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
-      if (!endMs || endMs <= now + 30_000) continue;
-
-      let initialYes = null, initialNo = null;
-      try {
-        const prices = JSON.parse(m.outcomePrices ?? "[]");
-        const p0 = Number(prices[0]), p1 = Number(prices[1]);
-        if (Number.isFinite(p0)) initialYes = p0;
-        if (Number.isFinite(p1)) initialNo  = p1;
-      } catch { /* ignore */ }
-
-      // Skip if REST prices already show combined is not discounted
-      if (initialYes !== null && initialNo !== null && initialYes + initialNo >= 0.97) continue;
-
-      results.push({
-        id:          m.conditionId || m.id || tokens.upTokenId,
-        asset:       detectAsset(m.question || m.title),
-        question:    String(m.question || m.title || "Unknown").slice(0, 80),
-        windowMins:  Math.max(1, Math.round((endMs - now) / 60_000)),
-        upTokenId:   tokens.upTokenId,
-        downTokenId: tokens.downTokenId,
-        endMs,
-        initialYes,
-        initialNo,
-      });
-    }
-  } catch { /* network error — return cached */ }
-
-  _arbCache = results;
-  _arbCachedAt = Date.now();
-  return results;
+  // Delegate to the broad scan — fetchAllBinaryMarkets handles caching and dedup
+  return fetchAllBinaryMarkets();
 }
 
 // ── Utility exports ──────────────────────────────────────────────────────────

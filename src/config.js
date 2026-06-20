@@ -1,5 +1,5 @@
 export const CONFIG = {
-  assets: ["BTC", "ETH", "SOL", "XRP", "DOGE", "AVAX", "LINK", "MATIC"],
+  assets: ["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC","BNB","ADA","DOT","TRX","TON","SHIB","PEPE","UNI","ATOM","NEAR","APT","SUI","ARB","OP","INJ"],
 
   binanceBaseUrl: "https://api.binance.com",
   gammaBaseUrl:   "https://gamma-api.polymarket.com",
@@ -14,6 +14,21 @@ export const CONFIG = {
     AVAX: "AVAXUSDT",
     LINK: "LINKUSDT",
     MATIC: "MATICUSDT",
+    BNB:  "BNBUSDT",
+    ADA:  "ADAUSDT",
+    DOT:  "DOTUSDT",
+    TRX:  "TRXUSDT",
+    TON:  "TONUSDT",
+    SHIB: "SHIBUSDT",
+    PEPE: "PEPEUSDT",
+    UNI:  "UNIUSDT",
+    ATOM: "ATOMUSDT",
+    NEAR: "NEARUSDT",
+    APT:  "APTUSDT",
+    SUI:  "SUIUSDT",
+    ARB:  "ARBUSDT",
+    OP:   "OPUSDT",
+    INJ:  "INJUSDT",
   },
 
   combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.97,
