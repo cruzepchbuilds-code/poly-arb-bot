@@ -9,6 +9,8 @@ const LIVE = process.env.LIVE_MODE === "true";
 export class WindowPosition {
   constructor({ id, asset, upTokenId, downTokenId, windowEndMs }) {
     this.id = id;
+    this.type = "window";
+    this.marketId = null;   // set externally when multiple ARB entries share a market
     this.asset = asset;
     this.upTokenId = upTokenId;
     this.downTokenId = downTokenId;

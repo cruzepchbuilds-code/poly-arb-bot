@@ -65,6 +65,6 @@ export const CONFIG = {
 
   refreshMs: {
     klines: 10_000, scan: 30_000, clob: 3_000, display: 1_000,
-    marketRefresh: 20_000, simSave: 30_000, priceSnap: 30_000,
+    marketRefresh: 8_000, simSave: 30_000, priceSnap: 30_000,
   },
 };

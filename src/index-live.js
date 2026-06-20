@@ -680,6 +680,7 @@ async function main() {
   let usdcBalance         = null;
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
   let startBalance        = CONFIG.paper.startBalance;
+  let _arbSeq             = 0;   // unique suffix for multi-ARB position IDs
 
   // Load all past trades from disk for history table + chart reconstruction
   const allTradeHistory   = loadTrades().sort((a, b) => (a.enteredAt ?? 0) - (b.enteredAt ?? 0));
@@ -749,10 +750,12 @@ async function main() {
   let _reservedUsdc = 0;
 
   clobWs.onOpportunity((marketId, yesPrice, noPrice) => {
-    if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return;
+    // Allow up to 5 concurrent ARB positions per market to sweep multiple book levels
+    const mktArbCount = [...activePositions.values()].filter(p => p.type === "window" && (p.marketId ?? p.id) === marketId).length;
+    if (mktArbCount >= 5 || enteringMarkets.has(marketId)) return;
     if (activePositions.size >= CONFIG.maxPositions) return;
     const market = marketList.find((m) => m.id === marketId) ?? arbMarketList.find((m) => m.id === marketId);
-    if (!market || market.endMs - Date.now() < 30_000) return;
+    if (!market || market.endMs - Date.now() < 15_000) return;
 
     // Recheck with ask prices — mid shows gap but we fill at ask
     const askYes = clobWs.getAsk(market.upTokenId) ?? yesPrice;
@@ -761,24 +764,25 @@ async function main() {
 
     const bet = kellySizeBet(askYes + askNo);
     if (bet < 1) return;
-    simBalance -= bet;           // reserve synchronously so next callback sees lower balance
+    simBalance -= bet;
     _reservedUsdc += bet;
     enteringMarkets.add(marketId);
+    const posId = `${market.id}_arb${_arbSeq++}`;
     (async () => {
       try {
         const pos = new WindowPosition({
-          id: market.id, asset: market.asset,
+          id: posId, asset: market.asset,
           upTokenId: market.upTokenId, downTokenId: market.downTokenId,
           windowEndMs: market.endMs,
         });
+        pos.marketId = market.id;
         const entered = await pos.enter(askYes, askNo, bet);
         if (entered) {
-          activePositions.set(market.id, pos);
+          activePositions.set(posId, pos);
           stats.entered++;
-          // Adjust for actual spend vs reserved estimate
           simBalance += bet - (pos.totalSpent ?? 0);
         } else {
-          simBalance += bet; // restore if entry failed
+          simBalance += bet;
         }
       } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(marketId); }
     })();
@@ -868,7 +872,8 @@ async function main() {
     try {
       const t = getThreshold();
       for (const market of [...marketList, ...arbMarketList]) {
-        if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+        const mktArbCount = [...activePositions.values()].filter(p => p.type === "window" && (p.marketId ?? p.id) === market.id).length;
+        if (mktArbCount >= 5 || enteringMarkets.has(market.id)) continue;
         if (activePositions.size >= CONFIG.maxPositions) break;
         const upAge   = clobWs.getAgeMs(market.upTokenId);
         const downAge = clobWs.getAgeMs(market.downTokenId);
@@ -881,8 +886,7 @@ async function main() {
         } catch { continue; }
 
         if (yesPrice == null || noPrice == null) continue;
-        if (yesPrice + noPrice >= t || market.endMs - Date.now() < 30_000) continue;
-        // Prefer WS ask prices — REST mid might show gap that doesn't exist at ask
+        if (yesPrice + noPrice >= t || market.endMs - Date.now() < 15_000) continue;
         const askYes = clobWs.getAsk(market.upTokenId) ?? yesPrice;
         const askNo  = clobWs.getAsk(market.downTokenId) ?? noPrice;
         if (askYes + askNo >= t) continue;
@@ -892,16 +896,18 @@ async function main() {
         simBalance -= bet;
         _reservedUsdc += bet;
         enteringMarkets.add(market.id);
+        const posId = `${market.id}_arb${_arbSeq++}`;
         try {
           const pos = new WindowPosition({
-            id: market.id, asset: market.asset,
+            id: posId, asset: market.asset,
             upTokenId: market.upTokenId, downTokenId: market.downTokenId,
             windowEndMs: market.endMs,
           });
+          pos.marketId = market.id;
           const entered = await pos.enter(askYes, askNo, bet);
           if (entered) {
             simBalance += bet - (pos.totalSpent ?? 0);
-            activePositions.set(market.id, pos);
+            activePositions.set(posId, pos);
             stats.entered++;
           } else { simBalance += bet; }
         } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(market.id); }
@@ -2124,9 +2130,11 @@ async function main() {
             trackPnl();
             logTrade(s); allTradeHistory.push(s);
             stats.record(pos);
-            clobWs.removeMarket(id);
-            userWs?.removeMarket(id);
+            const mktId = pos.marketId ?? id;
             activePositions.delete(id);
+            // Only unsubscribe WS when the last ARB position for this market closes
+            const hasMore = [...activePositions.values()].some(p => (p.marketId ?? p.id) === mktId);
+            if (!hasMore) { clobWs.removeMarket(mktId); userWs?.removeMarket(mktId); }
           }
         }
       }
