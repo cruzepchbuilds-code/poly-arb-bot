@@ -8,6 +8,7 @@ import { CONFIG } from "./config.js";
 import { fetchAllBinaryMarkets, fetchClobMidPrices } from "./data/polymarket.js";
 import { ClobWsFeed } from "./data/clobWs.js";
 import { getUserOrderFeed } from "./data/clobUserWs.js";
+import { BinanceWsFeed } from "./data/binanceWs.js";
 import { logTrade, loadTrades } from "./data/logger.js";
 import { loadSimState, saveSimState } from "./data/simState.js";
 import { WindowPosition } from "./live/positions.js";
@@ -49,56 +50,15 @@ const fmtPx = (p, asset) => {
   return `$${p.toFixed(4)}`;
 };
 
-// Kraken REST pairs — polls all assets in one request every 2s
-const KRAKEN_PAIRS = {
-  BTC: "XBTUSD",    ETH: "ETHUSD",   SOL: "SOLUSD",   XRP: "XXRPZUSD",
-  DOGE: "XDGUSD",  AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
-  BNB: "BNBUSD",   ADA: "ADAUSD",   DOT: "DOTUSD",   TRX: "TRXUSD",
-  TON: "TONUSD",   SHIB: "SHIBUSD", PEPE: "PEPEUSD", UNI: "UNIUSD",
-  ATOM: "ATOMUSD", NEAR: "NEARUSD", APT: "APTUSD",   SUI: "SUIUSD",
-  ARB: "ARBUSD",   OP: "OPUSD",     INJ: "INJUSD",
-};
-// Kraken returns these keys in the result object
-const KRAKEN_RESULT_KEYS = {
-  BTC: "XXBTZUSD",  ETH: "XETHZUSD", SOL: "SOLUSD",   XRP: "XXRPZUSD",
-  DOGE: "XDGUSD",  AVAX: "AVAXUSD", LINK: "LINKUSD", MATIC: "MATICUSD",
-  BNB: "BNBUSD",   ADA: "ADAUSD",   DOT: "DOTUSD",   TRX: "TRXUSD",
-  TON: "TONUSD",   SHIB: "SHIBUSD", PEPE: "PEPEUSD", UNI: "UNIUSD",
-  ATOM: "ATOMUSD", NEAR: "NEARUSD", APT: "APTUSD",   SUI: "SUIUSD",
-  ARB: "ARBUSD",   OP: "OPUSD",     INJ: "INJUSD",
-};
 
 function startPriceFeeds(assets) {
-  const prices  = {};
-  let closed    = false;
-  let timer     = null;
-
-  const pairs = assets.map(a => KRAKEN_PAIRS[a]).filter(Boolean).join(",");
-
-  const poll = async () => {
-    if (closed) return;
-    try {
-      const res = await fetch(`https://api.kraken.com/0/public/Ticker?pair=${pairs}`,
-        { signal: AbortSignal.timeout(3000) });
-      if (!res.ok) return;
-      const json = await res.json();
-      if (!json.result) return;
-      for (const asset of assets) {
-        const key = KRAKEN_RESULT_KEYS[asset];
-        const data = json.result?.[key] ?? json.result?.[KRAKEN_PAIRS[asset]];
-        if (!data) continue;
-        const p = Number(data.c?.[0]); // c = last trade closed [price, lot volume]
-        if (Number.isFinite(p) && p > 0) prices[asset] = p;
-      }
-    } catch { /* ignore timeouts */ }
-    if (!closed) timer = setTimeout(poll, 2_000);
-  };
-  poll();
+  const feed = new BinanceWsFeed(assets);
+  feed.connect();
 
   return Object.fromEntries(assets.map(a => [a, {
-    get:            () => prices[a] ?? null,
-    getVolPressure: () => 0.5,
-    close:          () => { closed = true; clearTimeout(timer); },
+    get:            () => feed.get(a),
+    getVolPressure: () => feed.getVolPressure(a),
+    close:          () => feed.close(),
   }]));
 }
 
