@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.pem
+.DS_Store
+logs/
+trades.jsonl
+sim-state.json
