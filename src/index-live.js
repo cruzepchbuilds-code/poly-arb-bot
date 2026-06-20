@@ -356,7 +356,7 @@ function render({
   }
 
   out.push(row(""));
-  out.push(sec("OPENSNIPE  (buy at market open 5-25s, Binance ≥0.3% move, ask ≤0.55)"));
+  out.push(sec("OPENSNIPE  (buy at market open 3-35s, Binance ≥0.8% move, ask ≤0.52)"));
   const opsTotal = opsStats.won + opsStats.lost;
   const opsWr    = opsTotal > 0 ? `${Math.round((opsStats.won / opsTotal) * 100)}%` : "--";
   const opsPnl   = opsStats.totalPayout - opsStats.totalSpent;
@@ -1311,6 +1311,7 @@ async function main() {
   const latencyBondCheck = () => {
     const now = Date.now();
     for (const market of marketList) {
+      if (market.isRotation === false) continue; // needs a fixed-cycle market, not a broad-scan one
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
@@ -1408,6 +1409,7 @@ async function main() {
   const openingPriceSnipe = () => {
     const now = Date.now();
     for (const market of marketList) {
+      if (market.isRotation === false) continue; // needs a fixed-cycle market, not a broad-scan one
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const marketStartMs = market.endMs - wm * 60_000;
@@ -1649,6 +1651,7 @@ async function main() {
   const fundingSnipeCheck = () => {
     const now = Date.now();
     for (const market of marketList) {
+      if (market.isRotation === false) continue; // needs a fixed-cycle market, not a broad-scan one
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
@@ -1743,6 +1746,7 @@ async function main() {
     const now = Date.now();
     try {
     for (const market of marketList) {
+      if (market.isRotation === false) continue; // needs a fixed-cycle market, not a broad-scan one
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
@@ -1838,6 +1842,7 @@ async function main() {
 
     for (const market of marketList) {
       if (_mrOrders.size >= 20) break;
+      if (market.isRotation === false) continue; // needs a fixed-cycle market, not a broad-scan one
       const wm = market.windowMins ?? 5;
       if (wm > 20) continue;
       const remaining = market.endMs - now;

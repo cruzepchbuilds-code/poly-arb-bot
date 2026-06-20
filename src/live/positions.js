@@ -24,6 +24,8 @@ export class WindowPosition {
 
     this.upFilled = false;
     this.downFilled = false;
+    this.upSizeFilled = 0;
+    this.downSizeFilled = 0;
     this.exitedUp = false;
     this.exitedDown = false;
 
@@ -90,15 +92,27 @@ export class WindowPosition {
   async tick(yesPrice, noPrice) {
     if (!this.upOrder && !this.downOrder) return;
 
-    // Check fills
+    // Check fills — track sizeFilled directly, not just the "matched" status string,
+    // which misses orders that filled (fully or partially) without that exact status
+    // ever being observed (see directional.js for the confirmed real-money incident).
     if (this.upOrder && !this.upFilled && !this.exitedUp) {
       const s = await getOrderStatus(this.upOrder.orderId);
-      if (s?.status === "matched") { this.upFilled = true; this._log("UP FILLED"); }
+      if (s) {
+        this.upSizeFilled = Math.max(this.upSizeFilled, s.sizeFilled ?? 0);
+        if (s.status === "matched" || (this.shares && this.upSizeFilled >= this.shares)) {
+          this.upFilled = true; this._log("UP FILLED");
+        }
+      }
     }
 
     if (this.downOrder && !this.downFilled && !this.exitedDown) {
       const s = await getOrderStatus(this.downOrder.orderId);
-      if (s?.status === "matched") { this.downFilled = true; this._log("DOWN FILLED"); }
+      if (s) {
+        this.downSizeFilled = Math.max(this.downSizeFilled, s.sizeFilled ?? 0);
+        if (s.status === "matched" || (this.shares && this.downSizeFilled >= this.shares)) {
+          this.downFilled = true; this._log("DOWN FILLED");
+        }
+      }
     }
 
     const remainingMins = this.remainingMs / 60_000;
@@ -162,6 +176,8 @@ export class WindowPosition {
       guaranteedProfit: this.guaranteedProfit,
       upFilled: this.upFilled,
       downFilled: this.downFilled,
+      upSizeFilled: this.upSizeFilled,
+      downSizeFilled: this.downSizeFilled,
       exitedUp: this.exitedUp,
       exitedDown: this.exitedDown,
       expired: this.expired,

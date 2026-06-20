@@ -108,6 +108,7 @@ function normalizeSlugMarket(m, asset, windowEndMs, windowMins = 5) {
     asset,
     question:    String(m.question || m.title || `${asset} Up or Down ${windowMins}m`),
     windowMins,
+    isRotation:  true, // genuine fixed-cycle 5m/10m market — windowMins is a stable property
     upTokenId:   tokens.upTokenId,
     downTokenId: tokens.downTokenId,
     endMs,
@@ -237,7 +238,11 @@ export async function fetchAllBinaryMarkets() {
       id:          m.conditionId || m.id || tokens.upTokenId,
       asset,
       question:    String(m.question || m.title || "Unknown").slice(0, 80),
+      // Display-only — minutes remaining right now, NOT a fixed market property. It keeps
+      // shrinking every refresh, so it must never be used as a fixed-cycle "windowMins" gate
+      // (that previously made these markets fail short-window timing checks ~100% of the time).
       windowMins:  Math.max(1, Math.round((endMs - now) / 60_000)),
+      isRotation:  false, // not a fixed 5m/10m cycle — short-window rotation strategies should skip it
       upTokenId:   tokens.upTokenId,
       downTokenId: tokens.downTokenId,
       endMs,
@@ -246,9 +251,11 @@ export async function fetchAllBinaryMarkets() {
     });
   }
 
-  // Merge broad + slug, deduplicate by id
+  // Merge slug + broad, deduplicate by id — slug first so the reliable, fixed-cycle
+  // version of a market wins over its broad-scan duplicate (which has isRotation: false
+  // and a constantly-shrinking windowMins instead of a stable one).
   const seen = new Set();
-  const merged = [...broadMarkets, ...slugMarkets].filter(m => {
+  const merged = [...slugMarkets, ...broadMarkets].filter(m => {
     if (seen.has(m.id)) return false;
     seen.add(m.id);
     return true;
