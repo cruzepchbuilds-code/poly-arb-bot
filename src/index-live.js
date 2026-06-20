@@ -1404,8 +1404,16 @@ async function main() {
       const isCarry = carry?.side === side && (now - carry.settledAt) < 45_000;
       const carryMult = isCarry ? 1.35 : 1.0;
 
+      // Cross-asset carry: BTC↔ETH correlation ~0.9 — if the correlated asset just won
+      // in the same direction within 30s, add a modest boost
+      const CORRELATED = { BTC: "ETH", ETH: "BTC" };
+      const crossAsset  = CORRELATED[market.asset];
+      const crossSettle = crossAsset ? _recentSettlements.get(crossAsset) : null;
+      const isCross     = crossSettle?.side === side && (now - crossSettle.settledAt) < 30_000;
+      const crossMult   = isCross ? 1.15 : 1.0;
+
       const betSize = dynamicBetSize(market.asset, 0.22,
-        adaptive.getMultiplier(market.asset, "OPENSNIPE") * getTimeMultiplier() * carryMult * bpOpsMult);
+        adaptive.getMultiplier(market.asset, "OPENSNIPE") * getTimeMultiplier() * carryMult * crossMult * bpOpsMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _opsEntered.add(market.id);
@@ -1427,7 +1435,8 @@ async function main() {
             simBalance += betSize - (pos.totalSpent ?? 0);
             activePositions.set(market.id, pos);
             opsStats.entered++;
-            console.error(`[ops] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  ${Math.round(ageMs/1000)}s old  $${betSize.toFixed(2)}${isCarry ? "  CARRY" : ""}`);
+            const carryTag = isCarry ? "  CARRY" : isCross ? "  XCARRY" : "";
+            console.error(`[ops] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  ${Math.round(ageMs/1000)}s old  $${betSize.toFixed(2)}${carryTag}`);
           } else { simBalance += betSize; _opsEntered.delete(market.id); }
         } catch { simBalance += betSize; _opsEntered.delete(market.id); }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
