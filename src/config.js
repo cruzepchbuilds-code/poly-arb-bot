@@ -46,7 +46,7 @@ export const CONFIG = {
     klinesInterval: "1m", klinesLimit: 100, vwapSlopePoints: 5,
   },
 
-  paper: { startBalance: 100, tradeShares: 10 },
+  paper: { startBalance: Number(process.env.START_BALANCE) || 100, tradeShares: 10 },
 
   refreshMs: {
     klines: 10_000, scan: 30_000, clob: 3_000, display: 1_000,
