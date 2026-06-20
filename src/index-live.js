@@ -21,6 +21,7 @@ import { startTradeFlow, stopTradeFlow, getVolumeSpike, getBuyPressure } from ".
 import { getEventMultiplier, getCurrentEvent } from "./live/fedWatch.js";
 import { startWhaleFeed, stopWhaleFeed, getWhaleSignal } from "./live/whaleFeed.js";
 import { startDeribitFeed, stopDeribitFeed, getDeribitGamma } from "./live/deribitFeed.js";
+import { startUmaFeed, stopUmaFeed, getUmaSettlement, getUmaStats } from "./live/umaOracleFeed.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -784,6 +785,7 @@ async function main() {
   startTradeFlow();
   startWhaleFeed();
   startDeribitFeed();
+  startUmaFeed();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -1469,19 +1471,30 @@ async function main() {
       const osTier = OS_TIER[market.asset] ?? { maxMsPost: 30 * 60_000, minDelta: 0.003 };
       if (now - market.endMs > osTier.maxMsPost) continue;
 
+      // UMA on-chain settlement has priority — 100% certainty, no delta floor needed
+      const uma  = getUmaSettlement(market.asset, market.endMs);
       const snap = _closeSnaps.get(id);
-      if (!snap) continue;
 
-      const delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
-      if (Math.abs(delta) < osTier.minDelta) continue;
+      let side, delta;
+      if (uma) {
+        side  = uma.side;
+        delta = snap ? Math.abs((snap.closePrice - snap.openPrice) / snap.openPrice) : 0.001;
+        // UMA-confirmed: no delta floor (we know the outcome with certainty)
+      } else {
+        if (!snap) continue;
+        delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
+        if (Math.abs(delta) < osTier.minDelta) continue;
+        side  = delta > 0 ? "UP" : "DOWN";
+      }
 
-      const side    = delta > 0 ? "UP" : "DOWN";
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.90) continue; // must still be underpriced
 
+      // UMA-confirmed entries get a 1.15× size boost (certainty = more conviction)
+      const umaMult = uma ? 1.15 : 1.0;
       const betSize = dynamicBetSize(market.asset, 0.20,
-        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier()); // 20% (95% WR)
+        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier() * umaMult); // 20% (95% WR)
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _osEntered.add(id);
@@ -1492,21 +1505,23 @@ async function main() {
 
       (async () => {
         try {
-          // Extend windowEndMs by 10 min to give oracle time to settle in sim
+          // Extend windowEndMs by 90 min to give oracle time to settle in sim
           const pos = new DirectionalPosition({
             id, asset: market.asset, side, tokenId,
-            binanceOpenPrice: snap.openPrice,
+            binanceOpenPrice: snap?.openPrice ?? 0,
             windowEndMs: market.endMs + 90 * 60_000,
           });
           pos.oracleSnipe   = true;
-          pos.osClosePrice  = snap.closePrice;
+          pos.osUmaConfirmed = !!uma;
+          pos.osClosePrice  = snap?.closePrice ?? null;
           pos.osDelta       = delta;
           const entered = await pos.enter(ask, betSize);
           if (entered) {
             simBalance += betSize - (pos.totalSpent ?? 0);
             activePositions.set(id, pos);
             osStats.entered++;
-            console.error(`[os] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  $${betSize.toFixed(2)}  +${secsPostClose}s post-close`);
+            const umaTag = uma ? "  UMA✓" : "";
+            console.error(`[os] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  $${betSize.toFixed(2)}  +${secsPostClose}s post-close${umaTag}`);
           } else { simBalance += betSize; _osEntered.delete(id); }
         } catch { simBalance += betSize; _osEntered.delete(id); }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(id); }
@@ -1978,6 +1993,7 @@ async function main() {
     makerrebate:  { entered: mrStats.entered, won: mrStats.won, lost: mrStats.lost, totalSpent: mrStats.totalSpent, totalPayout: mrStats.totalPayout, activeOrders: _mrOrders.size },
     opensnipe:    { entered: opsStats.entered, won: opsStats.won, lost: opsStats.lost, totalSpent: opsStats.totalSpent, totalPayout: opsStats.totalPayout },
     deribit:      Object.fromEntries(["BTC","ETH"].map(a => [a, getDeribitGamma(a)])),
+    uma:          getUmaStats(),
     funding: Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getFundingData(a)])),
     whale:   Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getWhaleSignal(a)])),
     event:   getCurrentEvent(),
@@ -2058,6 +2074,7 @@ async function main() {
     stopTradeFlow();
     stopWhaleFeed();
     stopDeribitFeed();
+    stopUmaFeed();
     // Cancel all open maker-rebate orders before exit
     for (const [id] of _mrOrders) await cancelMakerOrders(id).catch(() => {});
     for (const feed of Object.values(feeds)) feed.close();
