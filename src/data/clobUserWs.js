@@ -115,6 +115,7 @@ export class ClobUserWsFeed {
   }
 }
 
+// Caller is responsible for calling .connect() once (matches ClobWsFeed/BinanceWsFeed).
 let _feed = null;
 export function getUserOrderFeed() {
   if (_feed) return _feed;
@@ -123,6 +124,5 @@ export function getUserOrderFeed() {
   const passphrase = process.env.POLY_PASSPHRASE;
   if (!apiKey || !secret || !passphrase) return null; // no creds — REST-only fallback
   _feed = new ClobUserWsFeed({ apiKey, secret, passphrase });
-  _feed.connect();
   return _feed;
 }
