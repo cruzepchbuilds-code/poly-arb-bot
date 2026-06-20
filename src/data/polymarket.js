@@ -224,7 +224,7 @@ export async function fetchAllBinaryMarkets() {
     const tokens = getTokenIds(m);
     if (!tokens.upTokenId || !tokens.downTokenId) continue;
     const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime);
-    if (!endMs || endMs <= now + 30_000 || endMs > now + 90 * 60_000) continue;
+    if (!endMs || endMs <= now + 30_000) continue;
     const asset = detectAsset(m.question || m.title);
     let initialYes = null, initialNo = null;
     try {
