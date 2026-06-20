@@ -612,6 +612,9 @@ async function main() {
   const ASSET_CLOB_CAP = {
     BTC: 5000, ETH: 5000, SOL: 3000,
     XRP: 2500, DOGE: 2000, AVAX: 1500, LINK: 1500, MATIC: 1500,
+    BNB: 2000, ADA: 1500, DOT: 1500, TRX: 1500, TON: 1500,
+    SHIB: 1000, PEPE: 1000, UNI: 1500, ATOM: 1500, NEAR: 1500,
+    APT: 1500, SUI: 1500, ARB: 1500, OP: 1500, INJ: 1500,
   };
 
   // Per-asset OracleSnipe staleness window + delta floor (thin assets stay stale far longer)
@@ -720,11 +723,12 @@ async function main() {
   // Liquidity-aware bet sizer: scales with balance but respects CLOB depth per asset.
   // At $500 → small bets, trade frequently. At $50k → capped by thin-market liquidity.
   const dynamicBetSize = (asset, pct, multiplier = 1) => {
-    const allocated   = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-    const available   = Math.max(0, simBalance - allocated);
+    const allocated    = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+    const available    = Math.max(0, simBalance - allocated);
     const liquidityCap = ASSET_CLOB_CAP[asset] ?? 2000;
+    const tradeCap     = CONFIG.maxTradeUsdc ?? Infinity;
     const raw = simBalance * pct * multiplier;
-    return Math.max(CONFIG.minBetUsdc, Math.min(raw, available, liquidityCap));
+    return Math.max(CONFIG.minBetUsdc, Math.min(raw, available, liquidityCap, tradeCap));
   };
 
   const clobWs = new ClobWsFeed();
