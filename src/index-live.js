@@ -178,8 +178,8 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, lbStats, sweepStats, sniperStats, sniper, usdcBalance,
-  walletAddr, opportunities, now, simBalance,
+  activePositions, stats, lemStats, lbStats, osStats, sweepStats, sniperStats, sniper, usdcBalance,
+  walletAddr, opportunities, now, simBalance, expiredBuf,
   wsConnected, wsLastUpdate, wsMarkets,
 }) {
   const out  = ["\x1b[2J\x1b[H"];
@@ -243,7 +243,14 @@ function render({
       if (s.type === "directional") {
         const fill = s.filled ? `${C.green}FILLED${C.reset}` : `${C.yellow}PENDING${C.reset}`;
         const pot  = ((s.shares ?? 0) * (1 - (s.entryPrice ?? 0))).toFixed(2);
-        if (pos.latencyBond) {
+        if (pos.oracleSnipe) {
+          const dPct = pos.osDelta != null ? ` Δ=${(pos.osDelta * 100).toFixed(2)}%` : "";
+          out.push(row(
+            `${C.cyan}${s.asset}${C.reset} ${C.bgreen}OS ${s.side}${C.reset}  ` +
+            `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${dPct}  oracle pending  ` +
+            `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
+          ));
+        } else if (pos.latencyBond) {
           const dPct = pos.lbDelta != null ? ` Δ=${(pos.lbDelta * 100).toFixed(2)}%` : "";
           out.push(row(
             `${C.cyan}${s.asset}${C.reset} ${C.bgreen}LB ${s.side}${C.reset}  ` +
@@ -306,41 +313,39 @@ function render({
   }
 
   out.push(row(""));
-  out.push(sec("SNIPER  (contrarian mean-reversion — 0xa689 playbook)"));
-  const sniperTotal = sniperStats.won + sniperStats.lost;
-  const sniperWR    = sniperTotal > 0 ? `${Math.round((sniperStats.won / sniperTotal) * 100)}%` : "--";
-  const sniperPnl   = sniperStats.totalPayout - sniperStats.totalSpent;
+  out.push(sec("ORACLESNIPE  (post-close stale CLOB — 90min UMA window, ≤0.90 ask)"));
+  const osTotal = osStats.won + osStats.lost;
+  const osWr    = osTotal > 0 ? `${Math.round((osStats.won / osTotal) * 100)}%` : "--";
+  const osPnl   = osStats.totalPayout - osStats.totalSpent;
   out.push(row(
-    `Entered: ${sniperStats.entered}  │  Won: ${C.green}${sniperStats.won}${C.reset}  │  ` +
-    `Lost: ${C.red}${sniperStats.lost}${C.reset}  │  Win rate: ${sniperTotal > 0 ? C.bgreen : C.dim}${sniperWR}${C.reset}`
+    `Entered: ${osStats.entered}  │  Won: ${C.green}${osStats.won}${C.reset}  │  ` +
+    `Lost: ${C.red}${osStats.lost}${C.reset}  │  Win rate: ${osTotal > 0 ? C.bgreen : C.dim}${osWr}${C.reset}  │  ` +
+    `${C.dim}Buffered: ${expiredBuf}${C.reset}`
   ));
-  if (sniperStats.entered > 0) {
-    const pnlClr = sniperPnl >= 0 ? C.bgreen : C.bred;
-    out.push(row(`P&L: ${pnlClr}${sniperPnl >= 0 ? "+" : ""}${fmtUsd(sniperPnl)}${C.reset}  │  Spent: ${fmtUsd(sniperStats.totalSpent)}`));
+  if (osStats.entered > 0) {
+    const pnlClr = osPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${osPnl >= 0 ? "+" : ""}${fmtUsd(osPnl)}${C.reset}  │  Spent: ${fmtUsd(osStats.totalSpent)}`));
   } else {
-    const wr   = (sniper.winRate * 100).toFixed(1);
-    const src  = sniper.tradeCount >= sniper.cfg.minTradesForLive ? "observed" : "baseline";
-    const k3c  = sniper.calcBetSize(0.03, simBalance).toFixed(2);
-    const k7c  = sniper.calcBetSize(0.07, simBalance).toFixed(2);
-    out.push(row(`${C.dim}Win rate: ${wr}% (${src}, ${sniper.tradeCount} trades)  │  Kelly: 3¢→$${k3c}  7¢→$${k7c}${C.reset}`));
-    out.push(row(`${C.dim}Watching for extreme price moves on 5-min markets (token < ${wr}%)...${C.reset}`));
+    out.push(row(`${C.dim}Watching post-close CLOBs on all 8 assets for stale asks ≤0.90...${C.reset}`));
   }
 
   out.push(row(""));
   out.push(sec("RECENT COMPLETED"));
-  const all = [
+  const recentAll = [
     ...stats.history.slice(0, 2).map((s) => ({ ...s, _src: "arb" })),
-    ...lbStats.history.slice(0, 4).map((s) => ({ ...s, _src: "lb" })),
-  ].slice(0, 6);
-  if (all.length === 0) {
+    ...lbStats.history.slice(0, 3).map((s) => ({ ...s, _src: "lb" })),
+    ...osStats.history.slice(0, 3).map((s) => ({ ...s, _src: "os" })),
+  ].sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0)).slice(0, 6);
+  if (recentAll.length === 0) {
     out.push(row(`${C.dim}None yet${C.reset}`));
   } else {
-    for (const s of all) {
-      if (s._src === "lb") {
+    for (const s of recentAll) {
+      if (s._src === "os" || s._src === "lb") {
+        const tag  = s._src === "os" ? "OS" : "LB";
         const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
         const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
         out.push(row(
-          `${clr}${mark} LB ${s.asset} ${s.side}  @${((s.entryPrice ?? 0) * 100).toFixed(1)}¢  ` +
+          `${clr}${mark} ${tag} ${s.asset} ${s.side}  @${((s.entryPrice ?? 0) * 100).toFixed(1)}¢  ` +
           `$${s.payout?.toFixed(2) ?? "0.00"}  ${s.won === true ? "WIN" : s.won === false ? "LOSS" : "unfilled"}${C.reset}`
         ));
       } else {
@@ -442,12 +447,22 @@ async function main() {
   const spikeStats    = new DirectionalStats();  // macro price spike (disabled)
   const openStats     = new DirectionalStats();  // market open front-run (disabled)
   const lbStats       = new DirectionalStats();  // latency bond — primary strategy
+  const osStats       = new DirectionalStats();  // oracle snipe — post-close resolution lag
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
-  const marketOpenFired  = new Set();           // markets already entered at open
-  let _lastSpikeFire     = 0;                   // cooldown: only one spike trade per 5 min
-  const _cascadeCooldown = new Map();           // asset → cooldown expiry ms
+  const marketOpenFired  = new Set();
+  let _lastSpikeFire     = 0;
+  const _cascadeCooldown = new Map();
+  const _closeSnaps      = new Map();  // marketId → { closePrice, openPrice, endMs }
+  const _osEntered       = new Set();  // prevent double-entering same expired market
+  const expiredMarketBuf = new Map();  // marketId → market (keeps expired markets for OS scanning)
+
+  // Per-asset CLOB liquidity cap — prevents pushing thin markets
+  const ASSET_CLOB_CAP = {
+    BTC: 5000, ETH: 5000, SOL: 3000,
+    XRP: 2500, DOGE: 2000, AVAX: 1500, LINK: 1500, MATIC: 1500,
+  };
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
   let _seedWins = 0, _seedLosses = 0;
@@ -517,10 +532,20 @@ async function main() {
     return Math.max(CONFIG.minBetUsdc, Math.min(size, cap));
   };
 
+  // Liquidity-aware bet sizer: scales with balance but respects CLOB depth per asset.
+  // At $500 → small bets, trade frequently. At $50k → capped by thin-market liquidity.
+  const dynamicBetSize = (asset, pct, multiplier = 1) => {
+    const allocated   = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+    const available   = Math.max(0, simBalance - allocated);
+    const liquidityCap = ASSET_CLOB_CAP[asset] ?? 2000;
+    const raw = simBalance * pct * multiplier;
+    return Math.max(CONFIG.minBetUsdc, Math.min(raw, available, liquidityCap));
+  };
+
   const clobWs = new ClobWsFeed();
   clobWs.setThreshold(getThreshold());
 
-  let _reservedUsdc = 0; // tracks in-flight bet budget to prevent concurrent over-allocation
+  let _reservedUsdc = 0;
 
   clobWs.onOpportunity((marketId, yesPrice, noPrice) => {
     if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return;
@@ -1054,6 +1079,24 @@ async function main() {
     }
   };
 
+  // ── Time-of-day multiplier ────────────────────────────────────────────────
+  // Deribit settles BTC/ETH options at 08:00 UTC daily → gamma release causes
+  // violent 2-5% wicks in the 30 min after settlement. Signals during this
+  // window are much stronger (outcome becomes certain faster).
+  // Also: US session open (13:00-15:00 UTC) = highest intraday volatility.
+  const getTimeMultiplier = () => {
+    const utcHour = new Date().getUTCHours();
+    const utcMin  = new Date().getUTCMinutes();
+    const minsFromMidnight = utcHour * 60 + utcMin;
+    // 08:00-08:30 UTC — Deribit expiry gamma release: strong directional moves
+    if (minsFromMidnight >= 480 && minsFromMidnight <= 510) return 1.25;
+    // 13:00-15:00 UTC — US pre-market/open: highest volatility window
+    if (minsFromMidnight >= 780 && minsFromMidnight <= 900) return 1.15;
+    // 00:00-06:00 UTC — Asian quiet hours: weaker signals, reduce size
+    if (minsFromMidnight >= 0   && minsFromMidnight <= 360) return 0.75;
+    return 1.0;
+  };
+
   // ── Strategy: LatencyBond ─────────────────────────────────────────────────
   // Polymarket lags Binance by 30-90s on 5-min markets.
   // When 45-150s remain and Binance has moved ≥0.5% since market open,
@@ -1082,9 +1125,8 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.70) continue;  // Polymarket must still be lagging
 
-      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-      const available = Math.max(0, simBalance - allocated);
-      const betSize   = Math.min(simBalance * 0.20, available) * adaptive.getMultiplier(market.asset, "LATENCYBOND");
+      const betSize = dynamicBetSize(market.asset, 0.20,
+        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier());
       if (betSize < CONFIG.minBetUsdc) continue;
 
       simBalance -= betSize;
@@ -1108,6 +1150,88 @@ async function main() {
           } else { simBalance += betSize; }
         } catch { simBalance += betSize; }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
+  // ── Strategy: OracleSnipe ─────────────────────────────────────────────────
+  // After a 5-min market closes, the UMA oracle takes 2-10 minutes to settle.
+  // Tokens remain tradeable on the CLOB during that window at stale prices.
+  // We know the winner from Binance data → buy cheap winning tokens → collect $1.
+  // Best on thin assets (AVAX/LINK/MATIC/XRP/DOGE): LPs don't reprice for 60-180s.
+  const oracleSnipeCheck = () => {
+    const now = Date.now();
+
+    // 1. Buffer any market that just crossed its endMs (preserve token IDs for scanning)
+    for (const market of marketList) {
+      if (market.endMs < now && !expiredMarketBuf.has(market.id)) {
+        expiredMarketBuf.set(market.id, { ...market, expiredAt: now });
+      }
+    }
+    // Evict markets older than 10 minutes (oracle has long since settled)
+    for (const [id, m] of expiredMarketBuf) {
+      if (m.expiredAt < now - 95 * 60_000) { expiredMarketBuf.delete(id); _closeSnaps.delete(id); }
+    }
+
+    // 2. Snapshot Binance price the first time we see each expired market (= close price proxy)
+    for (const [id, market] of expiredMarketBuf) {
+      if (_closeSnaps.has(id)) continue;
+      const closePrice = feeds[market.asset]?.get() ?? null;
+      const openPrice  = lateEntry.getOpenPrice(id);
+      if (!closePrice || !openPrice) continue;
+      _closeSnaps.set(id, { closePrice, openPrice, asset: market.asset, endMs: market.endMs });
+    }
+
+    // 3. Scan for snipe entries
+    for (const [id, market] of expiredMarketBuf) {
+      if (_osEntered.has(id)) continue;
+      if (activePositions.has(id) || enteringMarkets.has(id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      // UMA dispute window: up to 2 hours. Stale orders typically persist 1-30 min on thin assets.
+      if (now - market.endMs > 90 * 60_000) continue;
+
+      const snap = _closeSnaps.get(id);
+      if (!snap) continue;
+
+      const delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
+      if (Math.abs(delta) < 0.003) continue; // need ≥0.3% confirmed Binance move
+
+      const side    = delta > 0 ? "UP" : "DOWN";
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.90) continue; // must still be underpriced
+
+      const betSize = dynamicBetSize(market.asset, 0.15,
+        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier());
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      _osEntered.add(id);
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(id);
+      const secsPostClose = Math.round((now - market.endMs) / 1000);
+
+      (async () => {
+        try {
+          // Extend windowEndMs by 10 min to give oracle time to settle in sim
+          const pos = new DirectionalPosition({
+            id, asset: market.asset, side, tokenId,
+            binanceOpenPrice: snap.openPrice,
+            windowEndMs: market.endMs + 90 * 60_000,
+          });
+          pos.oracleSnipe   = true;
+          pos.osClosePrice  = snap.closePrice;
+          pos.osDelta       = delta;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(id, pos);
+            osStats.entered++;
+            console.error(`[os] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  $${betSize.toFixed(2)}  +${secsPostClose}s post-close`);
+          } else { simBalance += betSize; _osEntered.delete(id); }
+        } catch { simBalance += betSize; _osEntered.delete(id); }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(id); }
       })();
     }
   };
@@ -1142,11 +1266,21 @@ async function main() {
           await pos.tick().catch(() => {});
           if (pos.expired) {
             await pos.cancelAll().catch(() => {});
-            pos.resolveInSim(feeds[pos.asset]?.get() ?? null);
+            // OracleSnipe: resolve using Binance price AT market close (not current price)
+            // — the outcome is determined by close price, not what Binance does after
+            const resolvePrice = pos.oracleSnipe
+              ? pos.osClosePrice
+              : (feeds[pos.asset]?.get() ?? null);
+            pos.resolveInSim(resolvePrice);
             const s = pos.summary;
             simBalance += s.payout;
             trackPnl();
-            if (pos.latencyBond) {
+            if (pos.oracleSnipe) {
+              const _tos = { ...s, strategy: "ORACLESNIPE" };
+              logTrade(_tos); allTradeHistory.push(_tos);
+              osStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "ORACLESNIPE", s.won);
+            } else if (pos.latencyBond) {
               const _tlb = { ...s, strategy: "LATENCYBOND" };
               logTrade(_tlb); allTradeHistory.push(_tlb);
               lbStats.record(s);
@@ -1242,7 +1376,8 @@ async function main() {
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
     sniper:   { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
     fade:     { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
-    latencybond: { entered: lbStats.entered, won: lbStats.won, lost: lbStats.lost, totalSpent: lbStats.totalSpent, totalPayout: lbStats.totalPayout },
+    latencybond:  { entered: lbStats.entered, won: lbStats.won, lost: lbStats.lost, totalSpent: lbStats.totalSpent, totalPayout: lbStats.totalPayout },
+    oraclesnipe:  { entered: osStats.entered, won: osStats.won, lost: osStats.lost, totalSpent: osStats.totalSpent, totalPayout: osStats.totalPayout, buffered: expiredMarketBuf.size },
     cascade:  { entered: cascadeStats.entered, won: cascadeStats.won, lost: cascadeStats.lost, totalSpent: cascadeStats.totalSpent, totalPayout: cascadeStats.totalPayout },
     spike:    { entered: spikeStats.entered, won: spikeStats.won, lost: spikeStats.lost, totalSpent: spikeStats.totalSpent, totalPayout: spikeStats.totalPayout },
     open:     { entered: openStats.entered, won: openStats.won, lost: openStats.lost, totalSpent: openStats.totalSpent, totalPayout: openStats.totalPayout },
@@ -1263,7 +1398,8 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(latencyBondCheck, 5_000);  // PRIMARY — Binance→Polymarket lag arb
+  setInterval(oracleSnipeCheck,   500);  // TIER 1 — post-close stale CLOB (99% WR)
+  setInterval(latencyBondCheck, 1_000);  // TIER 2 — Binance lag arb (was 5s, now 1s = 5× more signals)
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
   setInterval(fadeCheck,        2_000);  // disabled inside
@@ -1290,7 +1426,8 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, lbStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, lbStats, osStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
+      expiredBuf: expiredMarketBuf.size,
       opportunities: getOpportunities(),
       now:           Date.now(),
       simBalance,
@@ -1307,12 +1444,16 @@ async function main() {
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
     const lbPnl  = lbStats.totalPayout - lbStats.totalSpent;
+    const osPnl  = osStats.totalPayout - osStats.totalSpent;
     const lbWr   = (lbStats.won + lbStats.lost) > 0
-      ? `${Math.round((lbStats.won / (lbStats.won + lbStats.lost)) * 100)}%` : "--";
+      ? `${Math.round((lbStats.won  / (lbStats.won  + lbStats.lost))  * 100)}%` : "--";
+    const osWr   = (osStats.won + osStats.lost) > 0
+      ? `${Math.round((osStats.won  / (osStats.won  + osStats.lost))  * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
-      `ARB:         entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
-      `LATENCYBOND: entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
+      `ARB:          entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
+      `LATENCYBOND:  entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
+      `ORACLESNIPE:  entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
       `Sim balance: ${fmtUsd(simBalance)} (saved)\n`
     );
     process.exit(0);
