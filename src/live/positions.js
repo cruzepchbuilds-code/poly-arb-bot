@@ -9,6 +9,8 @@ const LIVE = process.env.LIVE_MODE === "true";
 export class WindowPosition {
   constructor({ id, asset, upTokenId, downTokenId, windowEndMs }) {
     this.id = id;
+    this.type = "window";
+    this.marketId = null;   // set externally when multiple ARB entries share a market
     this.asset = asset;
     this.upTokenId = upTokenId;
     this.downTokenId = downTokenId;
@@ -71,19 +73,19 @@ export class WindowPosition {
       `= $${this.totalSpent.toFixed(2)} → guaranteed +$${this.guaranteedProfit.toFixed(2)}`
     );
 
-    try {
-      this.upOrder = await placeLimitBuy(this.upTokenId, upPrice, this.shares);
-      this._log(`UP order placed [${this.upOrder.orderId}]`);
-    } catch (e) {
-      this._log(`UP order failed: ${e.message}`);
-    }
-
-    try {
-      this.downOrder = await placeLimitBuy(this.downTokenId, downPrice, this.shares);
-      this._log(`DOWN order placed [${this.downOrder.orderId}]`);
-    } catch (e) {
-      this._log(`DOWN order failed: ${e.message}`);
-    }
+    // Place both sides in parallel — halves order placement latency
+    const [upResult, dnResult] = await Promise.allSettled([
+      placeLimitBuy(this.upTokenId, upPrice, this.shares),
+      placeLimitBuy(this.downTokenId, downPrice, this.shares),
+    ]);
+    if (upResult.status === "fulfilled") {
+      this.upOrder = upResult.value;
+      this._log(`UP order [${this.upOrder.orderId}]`);
+    } else { this._log(`UP order failed: ${upResult.reason?.message}`); }
+    if (dnResult.status === "fulfilled") {
+      this.downOrder = dnResult.value;
+      this._log(`DOWN order [${this.downOrder.orderId}]`);
+    } else { this._log(`DOWN order failed: ${dnResult.reason?.message}`); }
 
     return true;
   }

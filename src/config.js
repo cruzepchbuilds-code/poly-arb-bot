@@ -64,7 +64,7 @@ export const CONFIG = {
   paper: { startBalance: Number(process.env.START_BALANCE) || 100, tradeShares: 10 },
 
   refreshMs: {
-    klines: 10_000, scan: 30_000, clob: 3_000, display: 1_000,
-    marketRefresh: 20_000, simSave: 30_000, priceSnap: 30_000,
+    klines: 10_000, scan: 10_000, clob: 1_000, display: 1_000,
+    marketRefresh: 8_000, simSave: 30_000, priceSnap: 30_000,
   },
 };
