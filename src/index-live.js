@@ -20,6 +20,7 @@ import { startFuturesFeed, stopFuturesFeed, getOIDelta, getFundingData } from ".
 import { startTradeFlow, stopTradeFlow, getVolumeSpike, getBuyPressure } from "./live/tradeFlow.js";
 import { getEventMultiplier, getCurrentEvent } from "./live/fedWatch.js";
 import { startWhaleFeed, stopWhaleFeed, getWhaleSignal } from "./live/whaleFeed.js";
+import { startDeribitFeed, stopDeribitFeed, getDeribitGamma } from "./live/deribitFeed.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -182,7 +183,7 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats,
+  activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats,
   sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance, expiredBuf,
   wsConnected, wsLastUpdate, wsMarkets,
@@ -216,7 +217,14 @@ function render({
     const arrow = w.direction === "UP" ? "↑" : "↓";
     return `${clr}${a}${arrow}$${(w.usdTotal / 1e6).toFixed(0)}M${C.reset}`;
   }).filter(Boolean).join(" ");
-  out.push(row(`${evStr}${whaleStr ? `  │  Whale: ${whaleStr}` : ""}`));
+  const gammaStr = ["BTC","ETH"].map(a => {
+    const g = getDeribitGamma(a);
+    if (!g) return null;
+    const clr = g.direction === "UP" ? C.bgreen : C.bred;
+    const arrow = g.direction === "UP" ? "↑" : "↓";
+    return `${clr}${a}${arrow}γ${Math.round(g.strength * 100)}%${C.reset}`;
+  }).filter(Boolean).join(" ");
+  out.push(row(`${evStr}${whaleStr ? `  │  Whale: ${whaleStr}` : ""}${gammaStr ? `  │  γ: ${gammaStr}` : ""}`));
   out.push(row(""));
 
   const momParts = Object.entries(feedMoms).map(([a, m]) => {
@@ -277,6 +285,13 @@ function render({
             `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${fPct}  ${fmtDuration(s.remainingMs)} left  ` +
             `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
           ));
+        } else if (pos.openSnipe) {
+          const dPct = pos.osDelta != null ? ` Δ=${(pos.osDelta * 100).toFixed(2)}%` : "";
+          out.push(row(
+            `${C.cyan}${s.asset}${C.reset} ${C.bgreen}OPS ${s.side}${C.reset}  ` +
+            `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${dPct}${pos.opsCarry ? " CARRY" : ""}  ${fmtDuration(s.remainingMs)} left  ` +
+            `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
+          ));
         } else if (pos.clobImb) {
           const iPct = pos.clobImbRatio != null ? ` imb=${(pos.clobImbRatio * 100).toFixed(0)}%` : "";
           out.push(row(
@@ -331,7 +346,23 @@ function render({
   }
 
   out.push(row(""));
-  out.push(sec("LATENCYBOND  (Binance lag arb — 45-150s left, ≥0.5% Δ, ask ≤0.70)"));
+  out.push(sec("OPENSNIPE  (buy at market open 5-25s, Binance ≥0.3% move, ask ≤0.55)"));
+  const opsTotal = opsStats.won + opsStats.lost;
+  const opsWr    = opsTotal > 0 ? `${Math.round((opsStats.won / opsTotal) * 100)}%` : "--";
+  const opsPnl   = opsStats.totalPayout - opsStats.totalSpent;
+  out.push(row(
+    `Entered: ${opsStats.entered}  │  Won: ${C.green}${opsStats.won}${C.reset}  │  ` +
+    `Lost: ${C.red}${opsStats.lost}${C.reset}  │  WR: ${opsTotal > 0 ? C.bgreen : C.dim}${opsWr}${C.reset}`
+  ));
+  if (opsStats.entered > 0) {
+    const pnlClr = opsPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${opsPnl >= 0 ? "+" : ""}${fmtUsd(opsPnl)}${C.reset}  │  Spent: ${fmtUsd(opsStats.totalSpent)}`));
+  } else {
+    out.push(row(`${C.dim}Watching for new markets trending ≥0.3% at open before LPs calibrate...${C.reset}`));
+  }
+
+  out.push(row(""));
+  out.push(sec("LATENCYBOND  (Binance lag arb — 50-120s left, time-scaled Δ, ask ≤0.70)"));
   const lbTotal  = lbStats.won + lbStats.lost;
   const lbWr     = lbTotal > 0 ? `${Math.round((lbStats.won / lbTotal) * 100)}%` : "--";
   const lbPnl    = lbStats.totalPayout - lbStats.totalSpent;
@@ -429,17 +460,18 @@ function render({
   out.push(sec("RECENT COMPLETED"));
   const recentAll = [
     ...stats.history.slice(0, 2).map((s) => ({ ...s, _src: "arb" })),
-    ...lbStats.history.slice(0, 3).map((s) => ({ ...s, _src: "lb" })),
-    ...osStats.history.slice(0, 3).map((s) => ({ ...s, _src: "os" })),
-    ...fsStats.history.slice(0, 2).map((s) => ({ ...s, _src: "fs" })),
-    ...ciStats.history.slice(0, 2).map((s) => ({ ...s, _src: "ci" })),
+    ...opsStats.history.slice(0, 2).map((s) => ({ ...s, _src: "ops" })),
+    ...lbStats.history.slice(0, 2).map((s) => ({ ...s, _src: "lb" })),
+    ...osStats.history.slice(0, 2).map((s) => ({ ...s, _src: "os" })),
+    ...fsStats.history.slice(0, 1).map((s) => ({ ...s, _src: "fs" })),
+    ...ciStats.history.slice(0, 1).map((s) => ({ ...s, _src: "ci" })),
   ].sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0)).slice(0, 6);
   if (recentAll.length === 0) {
     out.push(row(`${C.dim}None yet${C.reset}`));
   } else {
     for (const s of recentAll) {
-      if (s._src === "os" || s._src === "lb" || s._src === "fs" || s._src === "ci") {
-        const tag  = s._src === "os" ? "OS" : s._src === "fs" ? "FS" : s._src === "ci" ? "CI" : "LB";
+      if (s._src === "os" || s._src === "lb" || s._src === "fs" || s._src === "ci" || s._src === "ops") {
+        const tag  = s._src === "os" ? "OS" : s._src === "fs" ? "FS" : s._src === "ci" ? "CI" : s._src === "ops" ? "OPS" : "LB";
         const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
         const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
         out.push(row(
@@ -549,6 +581,7 @@ async function main() {
   const fsStats       = new DirectionalStats();  // funding snipe — extreme perp funding squeeze
   const ciStats       = new DirectionalStats();  // CLOB order book imbalance signal
   const mrStats       = new DirectionalStats();  // maker rebate farming (market-neutral)
+  const opsStats      = new DirectionalStats();  // opening price snipe (TIER 0)
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
@@ -558,8 +591,10 @@ async function main() {
   const _closeSnaps      = new Map();  // marketId → { closePrice, openPrice, endMs }
   const _osEntered       = new Set();  // prevent double-entering same expired market
   const expiredMarketBuf = new Map();  // marketId → market (keeps expired markets for OS scanning)
-  const _mrOrders        = new Map();  // marketId → { upOrder, dnOrder, asset, placedAt }
-  const _confluentMarkets = new Map(); // marketId → { lbTs, side } for confluence detection
+  const _mrOrders          = new Map(); // marketId → { upOrder, dnOrder, asset, placedAt }
+  const _confluentMarkets  = new Map(); // marketId → { lbTs, side } for confluence detection
+  const _opsEntered        = new Set(); // prevent double-entering same market in openingPriceSnipe
+  const _recentSettlements = new Map(); // asset → { side, settledAt } for consecutive carry
 
   // Per-asset CLOB liquidity cap — prevents pushing thin markets
   const ASSET_CLOB_CAP = {
@@ -625,7 +660,12 @@ async function main() {
   let isFallbackScanning  = false;
   let isLateEntryChecking = false;
 
-  const getThreshold = () => Number(process.env.COMBINED_THRESHOLD) || CONFIG.combinedThreshold;
+  const getThreshold = () => {
+    const base = Number(process.env.COMBINED_THRESHOLD) || CONFIG.combinedThreshold;
+    // During volume spikes, arb windows widen — lower threshold to capture them
+    const spiking = CONFIG.assets.some(a => (getVolumeSpike(a) ?? 0) > 3.0);
+    return spiking ? Math.min(base, 0.95) : base;
+  };
 
   const kellySizeBet = (combined) => {
     const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
@@ -743,6 +783,7 @@ async function main() {
   startFuturesFeed();
   startTradeFlow();
   startWhaleFeed();
+  startDeribitFeed();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -1269,10 +1310,16 @@ async function main() {
       const whale = getWhaleSignal(market.asset);
       const whaleMult = (whale && whale.direction === side && whale.ageMs < 30 * 60_000) ? 1.15 : 1.0;
 
+      // Deribit options gamma: if call/put wall aligns with our direction, MMs will amplify the move
+      const gamma = getDeribitGamma(market.asset);
+      const gammaMult = (gamma?.direction === side && gamma.strength > 0.15)
+        ? 1 + gamma.strength * 0.30 : 1.0;
+
       // Cap combined multiplier at 2.0× to prevent runaway bet sizes
       const combinedMult = Math.min(2.0,
-        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() * oiMult * spikeMult * eventMult * whaleMult);
-      const betSize = dynamicBetSize(market.asset, 0.20, combinedMult);
+        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() *
+        oiMult * spikeMult * eventMult * whaleMult * gammaMult);
+      const betSize = dynamicBetSize(market.asset, 0.25, combinedMult); // 25% base (98% WR supports more)
       if (betSize < CONFIG.minBetUsdc) continue;
 
       // Record for confluence detection (CI firing on same market within 3s = stronger signal)
@@ -1298,6 +1345,77 @@ async function main() {
             console.error(`[lb] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta * 100).toFixed(2)}%  $${betSize.toFixed(2)}  ${Math.round(remaining / 1000)}s left`);
           } else { simBalance += betSize; }
         } catch { simBalance += betSize; }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
+  // ── Strategy: Opening Price Snipe (TIER 0) ───────────────────────────────
+  // When a new 5-min market opens, the CLOB starts near 0.50/0.50 regardless of where
+  // Binance is. If Binance is already trending ≥0.3% BEFORE the market even exists,
+  // buy at ~0.50 ask while LPs are still initializing. LatencyBond only fires at 50-120s
+  // remaining — OPS captures the same edge 3-4 minutes earlier at a far better price.
+  // Bonus: if a previous market on the same asset just WON, multiply (consecutive carry).
+  const openingPriceSnipe = () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const marketStartMs = market.endMs - wm * 60_000;
+      const ageMs = now - marketStartMs;
+      if (ageMs < 5_000 || ageMs > 25_000) continue; // 5-25s into market life
+      if (_opsEntered.has(market.id)) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const currentPrice = feeds[market.asset]?.get() ?? null;
+      if (!currentPrice) continue;
+      const openPrice = lateEntry.getOpenPrice(market.id);
+      if (!openPrice) continue;
+
+      const delta = (currentPrice - openPrice) / openPrice;
+      if (Math.abs(delta) < 0.003) continue; // need ≥0.3% Binance move since open
+
+      const side    = delta > 0 ? "UP" : "DOWN";
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.55) continue; // CLOB must still be near 50/50
+
+      // Volume not collapsing
+      const spike = getVolumeSpike(market.asset);
+      if (spike !== null && spike < 0.3) continue;
+
+      // Consecutive carry multiplier: previous market on same asset settled same direction
+      const carry = _recentSettlements.get(market.asset);
+      const isCarry = carry?.side === side && (now - carry.settledAt) < 45_000;
+      const carryMult = isCarry ? 1.35 : 1.0;
+
+      const betSize = dynamicBetSize(market.asset, 0.22,
+        adaptive.getMultiplier(market.asset, "OPENSNIPE") * getTimeMultiplier() * carryMult);
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      _opsEntered.add(market.id);
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice: openPrice, windowEndMs: market.endMs,
+          });
+          pos.openSnipe     = true;
+          pos.osDelta       = delta;
+          pos.opsCarry      = isCarry;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            opsStats.entered++;
+            console.error(`[ops] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  ${Math.round(ageMs/1000)}s old  $${betSize.toFixed(2)}${isCarry ? "  CARRY" : ""}`);
+          } else { simBalance += betSize; _opsEntered.delete(market.id); }
+        } catch { simBalance += betSize; _opsEntered.delete(market.id); }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
       })();
     }
@@ -1352,8 +1470,8 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.90) continue; // must still be underpriced
 
-      const betSize = dynamicBetSize(market.asset, 0.15,
-        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier());
+      const betSize = dynamicBetSize(market.asset, 0.20,
+        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier()); // 20% (95% WR)
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _osEntered.add(id);
@@ -1423,8 +1541,13 @@ async function main() {
       const oiDelta = getOIDelta(market.asset, 300_000); // 5-minute OI window
       if (oiDelta !== null && oiDelta < 0) continue; // OI declining = unwind already started
 
+      // Deribit gamma cross-validation: if options flow opposes our direction, skip
+      const fsGamma = getDeribitGamma(market.asset);
+      if (fsGamma && fsGamma.direction !== side && fsGamma.strength > 0.3) continue;
+      const fsGammaMult = (fsGamma?.direction === side) ? 1 + fsGamma.strength * 0.20 : 1.0;
+
       const betSize = dynamicBetSize(market.asset, 0.10,
-        adaptive.getMultiplier(market.asset, "FUNDINGSNIPE") * getTimeMultiplier());
+        adaptive.getMultiplier(market.asset, "FUNDINGSNIPE") * getTimeMultiplier() * fsGammaMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _fsFired.add(market.id);
@@ -1513,7 +1636,7 @@ async function main() {
       // Scale bet with imbalance strength + confluence boost
       const imbMult = imbalance > 0.90 ? 1.5 : imbalance > 0.85 ? 1.25 : 1.0;
       const confluenceMult = isConfluent ? 1.4 : 1.0;
-      const betSize = dynamicBetSize(market.asset, 0.08,
+      const betSize = dynamicBetSize(market.asset, 0.10, // 10% base (structural edge)
         adaptive.getMultiplier(market.asset, "CLOBIMB") * getTimeMultiplier() * imbMult * confluenceMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
@@ -1703,11 +1826,22 @@ async function main() {
             const s = pos.summary;
             simBalance += s.payout;
             trackPnl();
-            if (pos.oracleSnipe) {
+            if (pos.openSnipe) {
+              const _tops = { ...s, strategy: "OPENSNIPE" };
+              logTrade(_tops); allTradeHistory.push(_tops);
+              opsStats.record(s);
+              if (s.won !== null) {
+                adaptive.record(pos.asset, "OPENSNIPE", s.won);
+                if (s.won === true) _recentSettlements.set(pos.asset, { side: s.side, settledAt: Date.now() });
+              }
+            } else if (pos.oracleSnipe) {
               const _tos = { ...s, strategy: "ORACLESNIPE" };
               logTrade(_tos); allTradeHistory.push(_tos);
               osStats.record(s);
-              if (s.won !== null) adaptive.record(pos.asset, "ORACLESNIPE", s.won);
+              if (s.won !== null) {
+                adaptive.record(pos.asset, "ORACLESNIPE", s.won);
+                if (s.won === true) _recentSettlements.set(pos.asset, { side: s.side, settledAt: Date.now() });
+              }
             } else if (pos.fundingSnipe) {
               const _tfs = { ...s, strategy: "FUNDINGSNIPE" };
               logTrade(_tfs); allTradeHistory.push(_tfs);
@@ -1722,7 +1856,10 @@ async function main() {
               const _tlb = { ...s, strategy: "LATENCYBOND" };
               logTrade(_tlb); allTradeHistory.push(_tlb);
               lbStats.record(s);
-              if (s.won !== null) adaptive.record(pos.asset, "LATENCYBOND", s.won);
+              if (s.won !== null) {
+                adaptive.record(pos.asset, "LATENCYBOND", s.won);
+                if (s.won === true) _recentSettlements.set(pos.asset, { side: s.side, settledAt: Date.now() });
+              }
             } else if (pos.sniper) {
               const _ts = { ...s, strategy: "SNIPER" };
               logTrade(_ts); allTradeHistory.push(_ts);
@@ -1819,6 +1956,8 @@ async function main() {
     fundingsnipe: { entered: fsStats.entered, won: fsStats.won, lost: fsStats.lost, totalSpent: fsStats.totalSpent, totalPayout: fsStats.totalPayout },
     clobimb:      { entered: ciStats.entered, won: ciStats.won, lost: ciStats.lost, totalSpent: ciStats.totalSpent, totalPayout: ciStats.totalPayout },
     makerrebate:  { entered: mrStats.entered, won: mrStats.won, lost: mrStats.lost, totalSpent: mrStats.totalSpent, totalPayout: mrStats.totalPayout, activeOrders: _mrOrders.size },
+    opensnipe:    { entered: opsStats.entered, won: opsStats.won, lost: opsStats.lost, totalSpent: opsStats.totalSpent, totalPayout: opsStats.totalPayout },
+    deribit:      Object.fromEntries(["BTC","ETH"].map(a => [a, getDeribitGamma(a)])),
     funding: Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getFundingData(a)])),
     whale:   Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getWhaleSignal(a)])),
     event:   getCurrentEvent(),
@@ -1843,8 +1982,10 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
+  setInterval(openingPriceSnipe,    500);  // TIER 0 — buy at market open before LPs calibrate
   setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
   setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
+  setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
   setInterval(fundingSnipeCheck, 30_000);  // TIER 3 — extreme funding rate squeeze
   setInterval(clobImbalanceCheck,  1_000); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
   setInterval(makerRebateCheck,   60_000); // TIER 5 — market-neutral maker rebate farming
@@ -1875,7 +2016,7 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats,
+      activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats,
       sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       expiredBuf: expiredMarketBuf.size,
       opportunities: getOpportunities(),
@@ -1896,6 +2037,7 @@ async function main() {
     stopFuturesFeed();
     stopTradeFlow();
     stopWhaleFeed();
+    stopDeribitFeed();
     // Cancel all open maker-rebate orders before exit
     for (const [id] of _mrOrders) await cancelMakerOrders(id).catch(() => {});
     for (const feed of Object.values(feeds)) feed.close();
@@ -1910,9 +2052,12 @@ async function main() {
     const osWr   = (osStats.won + osStats.lost) > 0 ? `${Math.round(osStats.won / (osStats.won + osStats.lost) * 100)}%` : "--";
     const fsWr   = (fsStats.won + fsStats.lost) > 0 ? `${Math.round(fsStats.won / (fsStats.won + fsStats.lost) * 100)}%` : "--";
     const ciWr   = (ciStats.won + ciStats.lost) > 0 ? `${Math.round(ciStats.won / (ciStats.won + ciStats.lost) * 100)}%` : "--";
+    const opsPnl = opsStats.totalPayout - opsStats.totalSpent;
+    const opsWr  = (opsStats.won + opsStats.lost) > 0 ? `${Math.round(opsStats.won / (opsStats.won + opsStats.lost) * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
       `ARB:           entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
+      `OPENSNIPE:     entered=${opsStats.entered}  won=${opsStats.won}  lost=${opsStats.lost}  WR=${opsWr}  P&L=${fmtUsd(opsPnl)}\n` +
       `LATENCYBOND:   entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
       `ORACLESNIPE:   entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
       `FUNDINGSNIPE:  entered=${fsStats.entered}  won=${fsStats.won}  lost=${fsStats.lost}  WR=${fsWr}  P&L=${fmtUsd(fsPnl)}\n` +
