@@ -31,7 +31,7 @@ export const CONFIG = {
     INJ:  "INJUSDT",
   },
 
-  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.97,
+  combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.98,
   momentumMinPct: 0.0002,
 
   kellyFraction:    0.25,

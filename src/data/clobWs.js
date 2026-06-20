@@ -127,7 +127,12 @@ export class ClobWsFeed {
 
   _subscribe(tokenIds) {
     if (this._ws?.readyState !== WebSocket.OPEN) return;
-    this._ws.send(JSON.stringify({ assets_ids: tokenIds, type: "market" }));
+    // Send in batches of 100 — large single messages are silently dropped by Polymarket WS
+    const BATCH = 100;
+    for (let i = 0; i < tokenIds.length; i += BATCH) {
+      const batch = tokenIds.slice(i, i + BATCH);
+      this._ws.send(JSON.stringify({ assets_ids: batch, type: "market" }));
+    }
   }
 
   _handle(msg) {
