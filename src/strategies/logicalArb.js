@@ -325,6 +325,24 @@ export function findLogicalPairs(markets) {
   return pairs;
 }
 
+/**
+ * Build a Map<tokenId, pair[]> so price-update callbacks can find relevant
+ * cross-market pairs in O(1) per token instead of scanning all pairs.
+ * tokenId → pairs where that token is marketA's upTokenId OR marketB's downTokenId.
+ */
+export function buildTokenIndex(pairs) {
+  const idx = new Map();
+  for (const pair of pairs) {
+    const a = pair.marketA.upTokenId;
+    const b = pair.marketB.downTokenId;
+    if (!idx.has(a)) idx.set(a, []);
+    if (!idx.has(b)) idx.set(b, []);
+    idx.get(a).push(pair);
+    idx.get(b).push(pair);
+  }
+  return idx;
+}
+
 // ─── CrossArbPosition ─────────────────────────────────────────────────────────
 
 const _LIVE = process.env.LIVE_MODE === 'true';

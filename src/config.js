@@ -32,6 +32,7 @@ export const CONFIG = {
   },
 
   combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.98,
+  makerArbThreshold: Number(process.env.MAKER_ARB_THRESHOLD) || 1.005,
   momentumMinPct: 0.0002,
 
   kellyFraction:    0.25,

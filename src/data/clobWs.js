@@ -4,13 +4,16 @@ const WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 export class ClobWsFeed {
   constructor() {
-    this._threshold   = 0.95;
+    this._threshold       = 0.95;
+    this._makerThreshold  = 1.005; // maker ARB fires when combined ASK < this (post bids 1 tick below)
     this._prices      = new Map(); // tokenId → { bid, ask, mid, updatedAt }
     this._volumes     = new Map(); // tokenId → { bidVol, askVol, updatedAt } (USD depth)
     this._markets     = new Map(); // marketId → market object
     this._tokenToMkt  = new Map(); // tokenId → marketId
     this._askHistory  = new Map(); // tokenId → [{ price, ts }]
-    this._onOpportunity = null;
+    this._onOpportunity      = null;
+    this._onMakerOpportunity = null; // fires when combined ASK < makerThreshold
+    this._onPriceUpdate      = null; // fires on every price update (tokenId, bid, ask, mid)
     this._onSweep       = null;
     this._ws            = null;
     this._closed        = false;
@@ -22,9 +25,12 @@ export class ClobWsFeed {
 
   get marketCount() { return this._markets.size; }
 
-  setThreshold(t)    { this._threshold = t; }
-  onOpportunity(fn)  { this._onOpportunity = fn; }
-  onSweep(fn)        { this._onSweep = fn; }
+  setThreshold(t)            { this._threshold = t; }
+  setMakerThreshold(t)       { this._makerThreshold = t; }
+  onOpportunity(fn)          { this._onOpportunity = fn; }
+  onMakerOpportunity(fn)     { this._onMakerOpportunity = fn; }
+  onPriceUpdate(fn)          { this._onPriceUpdate = fn; }
+  onSweep(fn)                { this._onSweep = fn; }
 
   addMarkets(markets) {
     const fresh = [];
@@ -201,16 +207,30 @@ export class ClobWsFeed {
       }
     }
 
-    // Arb opportunity check
-    if (this._onOpportunity) {
-      const marketId = this._tokenToMkt.get(tokenId);
-      const m        = marketId ? this._markets.get(marketId) : null;
-      if (!m) return;
-      const up = this._prices.get(m.upTokenId);
-      const dn = this._prices.get(m.downTokenId);
-      if (up?.mid == null || dn?.mid == null) return;
+    // Per-token price update hook (for WS-reactive XARB)
+    if (this._onPriceUpdate) {
+      this._onPriceUpdate(tokenId, bid, ask, mid);
+    }
+
+    // Same-market arb opportunity checks
+    const marketId = this._tokenToMkt.get(tokenId);
+    const m        = marketId ? this._markets.get(marketId) : null;
+    if (!m) return;
+    const up = this._prices.get(m.upTokenId);
+    const dn = this._prices.get(m.downTokenId);
+    if (!up || !dn) return;
+
+    // Taker ARB: fire when combined MID < threshold
+    if (this._onOpportunity && up.mid != null && dn.mid != null) {
       if (up.mid + dn.mid < this._threshold) {
         this._onOpportunity(marketId, up.mid, dn.mid);
+      }
+    }
+
+    // Maker ARB: fire when combined ASK < makerThreshold (post 1 tick below each ask)
+    if (this._onMakerOpportunity && up.ask != null && dn.ask != null) {
+      if (up.ask + dn.ask < this._makerThreshold) {
+        this._onMakerOpportunity(marketId, up.ask, dn.ask);
       }
     }
   }

@@ -29,7 +29,7 @@ import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
 import { AdaptiveSizer } from "./analytics/adaptive.js";
-import { findLogicalPairs, CrossArbPosition } from "./strategies/logicalArb.js";
+import { findLogicalPairs, buildTokenIndex, CrossArbPosition } from "./strategies/logicalArb.js";
 
 const C = {
   reset: "\x1b[0m", bold: "\x1b[1m", dim: "\x1b[2m",
@@ -646,6 +646,8 @@ async function main() {
   const _logicalArbPairs  = new Set(); // active cross-market pair keys → prevent duplicate entries
   let isLogicalArbChecking = false;
   const crossArbStats     = { entered: 0, bothFilled: 0, oneFilled: 0, noFills: 0, guaranteedProfit: 0, totalSpent: 0 };
+  const makerArbStats     = { entered: 0, bothFilled: 0, oneFilled: 0, noFills: 0, guaranteedProfit: 0, totalSpent: 0 };
+  let _xarbPairsByToken   = new Map(); // tokenId → [pair] — rebuilt on each market refresh for O(1) WS lookup
 
   // Load all past trades from disk for history table + chart reconstruction
   const allTradeHistory   = loadTrades().sort((a, b) => (a.enteredAt ?? 0) - (b.enteredAt ?? 0));
@@ -710,6 +712,7 @@ async function main() {
 
   const clobWs = new ClobWsFeed();
   clobWs.setThreshold(getThreshold());
+  clobWs.setMakerThreshold(CONFIG.makerArbThreshold);
 
   let _reservedUsdc = 0;
 
@@ -748,6 +751,103 @@ async function main() {
         }
       } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(marketId); }
     })();
+  });
+
+  // ── Maker ARB ─────────────────────────────────────────────────────────────
+  // Fires when combined ASK < 1.005. Post limit bids 1 tick below each ask:
+  //   net cost ≈ (combined_ask - 0.02) × 0.9955 after rebate — profitable up to combined_ask ≈ 1.024
+  // Far more opportunities than taker ARB (combined_ask < 0.98).
+  const enteringMakerMarkets = new Set();
+  clobWs.onMakerOpportunity((marketId, askYes, askNo) => {
+    if ((_mktArbCounts.get(marketId) ?? 0) >= 8 || enteringMakerMarkets.has(marketId)) return;
+    if (activePositions.size >= CONFIG.maxPositions) return;
+    const market = marketList.find((m) => m.id === marketId) ?? arbMarketList.find((m) => m.id === marketId);
+    // Maker orders need more time to fill — skip markets < 45s from expiry
+    if (!market || market.endMs - Date.now() < 45_000) return;
+
+    // Post 1 tick (0.01) below each ask → resting limit order → earn maker rebate +0.45%
+    const makerYes = Math.max(0.01, parseFloat((askYes - 0.01).toFixed(2)));
+    const makerNo  = Math.max(0.01, parseFloat((askNo  - 0.01).toFixed(2)));
+    const combined = makerYes + makerNo;
+    if (combined >= CONFIG.makerArbThreshold) return;
+
+    const bet = kellySizeBet(combined);
+    if (bet < 1) return;
+    simBalance -= bet;
+    _reservedUsdc += bet;
+    enteringMakerMarkets.add(marketId);
+    const posId = `${market.id}_marb${_arbSeq++}`;
+    (async () => {
+      try {
+        const pos = new WindowPosition({
+          id: posId, asset: market.asset,
+          upTokenId: market.upTokenId, downTokenId: market.downTokenId,
+          windowEndMs: market.endMs,
+        });
+        pos.marketId  = market.id;
+        pos.makerMode = true;
+        const entered = await pos.enter(makerYes, makerNo, bet);
+        if (entered) {
+          activePositions.set(posId, pos);
+          _mktArbCounts.set(market.id, (_mktArbCounts.get(market.id) ?? 0) + 1);
+          makerArbStats.entered++;
+          simBalance += bet - (pos.totalSpent ?? 0);
+        } else { simBalance += bet; }
+      } catch { simBalance += bet; }
+      finally   { _reservedUsdc -= bet; enteringMakerMarkets.delete(marketId); }
+    })();
+  });
+
+  // ── WS-reactive cross-market XARB ─────────────────────────────────────────
+  // On every token price update, instantly check all logical pairs touching that
+  // token — same latency as same-market ARB, no 30s polling delay.
+  clobWs.onPriceUpdate((tokenId) => {
+    const pairs = _xarbPairsByToken.get(tokenId);
+    if (!pairs?.length) return;
+    const threshold = getThreshold();
+    for (const pair of pairs) {
+      if (activePositions.size >= CONFIG.maxPositions) break;
+      const pairKey = `${pair.marketA.id}_x_${pair.marketB.id}`;
+      if (_logicalArbPairs.has(pairKey)) continue;
+      if (pair.marketA.endMs - Date.now() < 60_000 || pair.marketB.endMs - Date.now() < 60_000) continue;
+      const aAsk   = clobWs.getAsk(pair.marketA.upTokenId);
+      const bNoAsk = clobWs.getAsk(pair.marketB.downTokenId);
+      if (aAsk == null || bNoAsk == null) continue;
+      const combined = aAsk + bNoAsk;
+      // Try taker mode, then maker mode
+      let entryA = aAsk, entryBNo = bNoAsk, makerMode = false;
+      if (combined >= threshold) {
+        const mA   = parseFloat((aAsk   - 0.01).toFixed(2));
+        const mBNo = parseFloat((bNoAsk - 0.01).toFixed(2));
+        if (mA + mBNo >= CONFIG.makerArbThreshold) continue;
+        entryA = mA; entryBNo = mBNo; makerMode = true;
+      }
+      const entryCombined = entryA + entryBNo;
+      const bet    = kellySizeBet(entryCombined);
+      if (bet < 1) continue;
+      const shares = Math.floor(bet / entryCombined);
+      if (shares < 1) continue;
+      _logicalArbPairs.add(pairKey);
+      simBalance    -= bet;
+      _reservedUsdc += bet;
+      const posId = `xarb_${_arbSeq++}`;
+      (async () => {
+        try {
+          const pos = new CrossArbPosition({
+            id: posId, marketA: pair.marketA, marketB: pair.marketB,
+            aAsk: entryA, bNoAsk: entryBNo, shares,
+            pairDesc: `${pair.pairDesc}${makerMode ? ' [maker]' : ''}`,
+          });
+          const entered = await pos.enter();
+          if (entered) {
+            activePositions.set(posId, pos);
+            crossArbStats.entered++;
+            simBalance += bet - pos.totalSpent;
+          } else { simBalance += bet; _logicalArbPairs.delete(pairKey); }
+        } catch { simBalance += bet; _logicalArbPairs.delete(pairKey); }
+        finally   { _reservedUsdc -= bet; }
+      })();
+    }
   });
 
   clobWs.onSweep(({ tokenId, marketId, side, price, rise }) => {
@@ -877,56 +977,58 @@ async function main() {
     } finally { isFallbackScanning = false; }
   };
 
-  // ── Cross-market logical ARB ──────────────────────────────────────────────
-  // Scans ALL market types (crypto price levels, sports/esports brackets,
-  // weather thresholds, vote share, timing markets) for logical ordering pairs
-  // where P(A) >= P(B) always, then buys A_YES + B_NO when combined < threshold.
+  // ── Cross-market logical ARB — pair refresh ───────────────────────────────
+  // Rebuilds the logical pair list and WS token index every 60s (on market refresh).
+  // Actual entry is WS-reactive via clobWs.onPriceUpdate above — no polling delay.
+  // This function also does a catch-up sweep for any pairs already in range
+  // that the WS might have missed while the index was stale.
   const logicalArbCheck = async () => {
     if (isLogicalArbChecking) return;
     isLogicalArbChecking = true;
     try {
       const allMarkets = [...marketList, ...arbMarketList];
       const pairs      = findLogicalPairs(allMarkets);
-      const threshold  = getThreshold();
+      _xarbPairsByToken = buildTokenIndex(pairs); // rebuild for WS-reactive handler
 
+      // Catch-up sweep: check all pairs right now in case prices are already in range
+      const threshold  = getThreshold();
       for (const pair of pairs) {
         if (activePositions.size >= CONFIG.maxPositions) break;
-
         const pairKey = `${pair.marketA.id}_x_${pair.marketB.id}`;
         if (_logicalArbPairs.has(pairKey)) continue;
-
-        // Both tokens must be live in the WS feed
+        if (pair.marketA.endMs - Date.now() < 60_000 || pair.marketB.endMs - Date.now() < 60_000) continue;
         const aAsk   = clobWs.getAsk(pair.marketA.upTokenId);
         const bNoAsk = clobWs.getAsk(pair.marketB.downTokenId);
         if (aAsk == null || bNoAsk == null) continue;
-        if (aAsk + bNoAsk >= threshold) continue;
-
-        const combined = aAsk + bNoAsk;
+        let entryA = aAsk, entryBNo = bNoAsk, makerMode = false;
+        if (aAsk + bNoAsk >= threshold) {
+          const mA   = parseFloat((aAsk   - 0.01).toFixed(2));
+          const mBNo = parseFloat((bNoAsk - 0.01).toFixed(2));
+          if (mA + mBNo >= CONFIG.makerArbThreshold) continue;
+          entryA = mA; entryBNo = mBNo; makerMode = true;
+        }
+        const combined = entryA + entryBNo;
         const bet      = kellySizeBet(combined);
         if (bet < 1) continue;
         const shares = Math.floor(bet / combined);
         if (shares < 1) continue;
-
         _logicalArbPairs.add(pairKey);
         simBalance    -= bet;
         _reservedUsdc += bet;
-
         const posId = `xarb_${_arbSeq++}`;
         (async () => {
           try {
             const pos = new CrossArbPosition({
               id: posId, marketA: pair.marketA, marketB: pair.marketB,
-              aAsk, bNoAsk, shares, pairDesc: pair.pairDesc,
+              aAsk: entryA, bNoAsk: entryBNo, shares,
+              pairDesc: `${pair.pairDesc}${makerMode ? ' [maker]' : ''}`,
             });
             const entered = await pos.enter();
             if (entered) {
               activePositions.set(posId, pos);
               crossArbStats.entered++;
               simBalance += bet - pos.totalSpent;
-            } else {
-              simBalance += bet;
-              _logicalArbPairs.delete(pairKey);
-            }
+            } else { simBalance += bet; _logicalArbPairs.delete(pairKey); }
           } catch { simBalance += bet; _logicalArbPairs.delete(pairKey); }
           finally   { _reservedUsdc -= bet; }
         })();
@@ -2170,12 +2272,23 @@ async function main() {
           if (pos.expired) {
             await pos.cancelAll().catch(() => {});
             const s = pos.summary;
-            if (s.upFilled && s.downFilled) simBalance += (s.shares ?? 0) * 1.00;
-            else if (s.upFilled || s.downFilled) simBalance += (s.shares ?? 0) * 0.50;
-            else simBalance += s.totalSpent ?? 0;
+            let payout;
+            if (s.upFilled && s.downFilled) payout = (s.shares ?? 0) * 1.00;
+            else if (s.upFilled || s.downFilled) payout = (s.shares ?? 0) * 0.50;
+            else payout = s.totalSpent ?? 0;
+            simBalance += payout;
             trackPnl();
-            logTrade(s); allTradeHistory.push(s);
-            stats.record(pos);
+            const tradeRec = { ...s, payout };
+            logTrade(tradeRec); allTradeHistory.push(tradeRec);
+            if (pos.makerMode) {
+              // Maker ARB stats
+              if (s.upFilled && s.downFilled) { makerArbStats.bothFilled++; makerArbStats.guaranteedProfit += s.guaranteedProfit ?? 0; }
+              else if (s.upFilled || s.downFilled) makerArbStats.oneFilled++;
+              else makerArbStats.noFills++;
+              makerArbStats.totalSpent += s.totalSpent ?? 0;
+            } else {
+              stats.record(pos);
+            }
             const mktId = pos.marketId ?? id;
             const remaining = Math.max(0, (_mktArbCounts.get(mktId) ?? 1) - 1);
             _mktArbCounts.set(mktId, remaining);
@@ -2207,7 +2320,8 @@ async function main() {
     momentums:   Object.fromEntries(CONFIG.assets.map(a => [a, getMomentum(a)])),
     activePositions: [...activePositions.values()].map(p => p.summary),
     arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills, guaranteedProfit: stats.guaranteedProfit, totalSpent: stats.totalSpent },
-    crossarb: { entered: crossArbStats.entered, bothFilled: crossArbStats.bothFilled, oneFilled: crossArbStats.oneFilled, noFills: crossArbStats.noFills, guaranteedProfit: crossArbStats.guaranteedProfit, totalSpent: crossArbStats.totalSpent, activePairs: _logicalArbPairs.size },
+    crossarb:  { entered: crossArbStats.entered, bothFilled: crossArbStats.bothFilled, oneFilled: crossArbStats.oneFilled, noFills: crossArbStats.noFills, guaranteedProfit: crossArbStats.guaranteedProfit, totalSpent: crossArbStats.totalSpent, activePairs: _logicalArbPairs.size },
+    makerarb:  { entered: makerArbStats.entered, bothFilled: makerArbStats.bothFilled, oneFilled: makerArbStats.oneFilled, noFills: makerArbStats.noFills, guaranteedProfit: makerArbStats.guaranteedProfit, totalSpent: makerArbStats.totalSpent, threshold: CONFIG.makerArbThreshold },
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
     sniper:   { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
     fade:     { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
@@ -2247,7 +2361,7 @@ async function main() {
   // setInterval(oracleSnipeCheck,     500);  // TIER 1 — paused
   // setInterval(_pollGammaResolutions, 3_000); // paused (used by OracleSnipe)
   // setInterval(latencyBondCheck,     500);  // TIER 2 — paused
-  setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
+  setInterval(() => { clobWs.setThreshold(getThreshold()); clobWs.setMakerThreshold(CONFIG.makerArbThreshold); }, 10_000);
   // setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — paused
   // setInterval(clobImbalanceCheck,    500); // TIER 4 — paused
   // setInterval(makerRebateCheck,   10_000); // TIER 5 — paused
@@ -2324,6 +2438,7 @@ async function main() {
       `\n\nStopped.\n` +
       `ARB:           entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
       `XARB:          entered=${crossArbStats.entered}  both-filled=${crossArbStats.bothFilled}  locked=$${crossArbStats.guaranteedProfit.toFixed(2)}\n` +
+      `MAKER-ARB:     entered=${makerArbStats.entered}  both-filled=${makerArbStats.bothFilled}  locked=$${makerArbStats.guaranteedProfit.toFixed(2)}\n` +
       `OPENSNIPE:     entered=${opsStats.entered}  won=${opsStats.won}  lost=${opsStats.lost}  WR=${opsWr}  P&L=${fmtUsd(opsPnl)}\n` +
       `LATENCYBOND:   entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
       `ORACLESNIPE:   entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
