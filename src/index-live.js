@@ -617,6 +617,17 @@ async function main() {
     APT: 1500, SUI: 1500, ARB: 1500, OP: 1500, INJ: 1500,
   };
 
+  // Minimum absolute USD move for LatencyBond entry (from Novals83 5min-btc-polymarket repo).
+  // BTC: $70 (repo reference). Others: ~0.11% of typical price (same relative magnitude).
+  // Replaces the old time-scaled % threshold — absolute moves are more stable signal.
+  const LB_MIN_USD = {
+    BTC: 70,     ETH: 5.0,    SOL: 0.18,   XRP: 0.0007,  DOGE: 0.00015,
+    AVAX: 0.04,  LINK: 0.015, MATIC: 0.001, BNB: 0.65,   ADA: 0.0004,
+    DOT: 0.007,  TRX: 0.0001, TON: 0.005,  SHIB: 1e-9,   PEPE: 1.5e-9,
+    UNI: 0.008,  ATOM: 0.007, NEAR: 0.004, APT: 0.010,   SUI: 0.0015,
+    ARB: 0.0008, OP: 0.0015,  INJ: 0.02,
+  };
+
   // Per-asset OracleSnipe staleness window + delta floor (thin assets stay stale far longer)
   const OS_TIER = {
     BTC:  { maxMsPost:  6 * 60_000, minDelta: 0.005 },
@@ -1312,15 +1323,17 @@ async function main() {
       const openPrice = lateEntry.getOpenPrice(market.id);
       if (!openPrice) continue;
 
-      const delta = (currentPrice - openPrice) / openPrice;
-      // Delta threshold scales with time left: more time = more chance of reversal
-      const minDelta = remaining > 120_000 ? 0.005 : remaining > 80_000 ? 0.003 : 0.002;
-      if (Math.abs(delta) < minDelta) continue;
+      const delta   = (currentPrice - openPrice) / openPrice;
+      const absMove = Math.abs(currentPrice - openPrice);
+      const minMove = LB_MIN_USD[market.asset] ?? (openPrice * 0.001);
+      if (absMove < minMove) continue;
 
       const side    = delta > 0 ? "UP" : "DOWN";
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask > 0.70) continue;  // Polymarket must still be lagging
+      // Lag zone: market must be 0.45–0.70 (partial lag). Below 0.45 = market strongly
+      // disagrees with Binance → signal likely noise. Above 0.70 = market already caught up.
+      if (ask == null || ask < 0.45 || ask > 0.70) continue;
 
       // OI delta filter: declining OI = squeeze/unwind (weak signal), skip
       const oiDelta = getOIDelta(market.asset, 120_000);
@@ -1954,6 +1967,32 @@ async function main() {
               logTrade(_t0); allTradeHistory.push(_t0);
               lemStats.record(s);
               lateEntry.clearMarket(id);
+              clobWs.removeMarket(id);
+              activePositions.delete(id);
+              continue;
+            }
+            // Stop-loss: token dropped 30% below entry — sell at market price to cap damage.
+            // Only on LB/CI/OPS (not OracleSnipe which resolves at binary settlement).
+            if (
+              tokenPrice != null && pos.entryPrice && !pos.oracleSnipe &&
+              (pos.latencyBond || pos.clobImb || pos.openSnipe) &&
+              tokenPrice < pos.entryPrice * 0.70
+            ) {
+              pos.resolveStopLoss(tokenPrice);
+              await pos.cancelAll().catch(() => {});
+              const s = pos.summary;
+              simBalance += s.payout;
+              trackPnl();
+              const _slStrat = pos.latencyBond ? "LATENCYBOND" : pos.clobImb ? "CLOBIMB" : "OPENSNIPE";
+              logTrade({ ...s, strategy: _slStrat }); allTradeHistory.push({ ...s, strategy: _slStrat });
+              if (pos.latencyBond) {
+                lbStats.record(s); adaptive.record(pos.asset, "LATENCYBOND", false);
+              } else if (pos.clobImb) {
+                ciStats.record(s); adaptive.record(pos.asset, "CLOBIMB", false);
+              } else {
+                opsStats.record(s); adaptive.record(pos.asset, "OPENSNIPE", false);
+              }
+              console.error(`[sl] ${pos.asset} ${pos.side} stop-loss @${tokenPrice.toFixed(3)}  entry=${pos.entryPrice.toFixed(3)}  recover=$${s.payout.toFixed(2)}`);
               clobWs.removeMarket(id);
               activePositions.delete(id);
               continue;

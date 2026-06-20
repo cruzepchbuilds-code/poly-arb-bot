@@ -97,6 +97,22 @@ export class DirectionalPosition {
     );
   }
 
+  // Exit at current market price — used for stop-loss when token drops 30% from entry.
+  resolveStopLoss(tokenPrice) {
+    if (this.resolved) return;
+    this.resolved = true;
+    const filledShares = Math.max(this.sizeFilled, this.filled ? (this.shares ?? 0) : 0);
+    if (filledShares <= 0) {
+      this.payout = this.totalSpent ?? 0;
+      this._log("Stop-loss: unfilled → refunded");
+      return;
+    }
+    const recover = filledShares * tokenPrice;
+    this.won    = false;
+    this.payout = recover;
+    this._log(`STOP-LOSS @${tokenPrice.toFixed(3)}  recover=$${recover.toFixed(2)}  loss=$${((this.totalSpent ?? 0) - recover).toFixed(2)}`);
+  }
+
   // Sim-only: lock in profit early when deeply in-the-money.
   // Called by monitor when token price >= earlyExitMinPrice with little time left.
   resolveEarly(tokenPrice) {
