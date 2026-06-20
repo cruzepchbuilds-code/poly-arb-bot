@@ -2180,15 +2180,15 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(openingPriceSnipe,    500);  // TIER 0 — buy at market open before LPs calibrate
-  setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
-  setInterval(_pollGammaResolutions, 3_000); // gamma API resolution certainty (complements UMA)
-  setInterval(latencyBondCheck,     500);  // TIER 2 — Binance lag arb, OI+volume filtered
+  // setInterval(openingPriceSnipe,    500);  // TIER 0 — paused
+  // setInterval(oracleSnipeCheck,     500);  // TIER 1 — paused
+  // setInterval(_pollGammaResolutions, 3_000); // paused (used by OracleSnipe)
+  // setInterval(latencyBondCheck,     500);  // TIER 2 — paused
   setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
-  setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — extreme funding rate squeeze
-  setInterval(clobImbalanceCheck,    500); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
-  setInterval(makerRebateCheck,   10_000); // TIER 5 — market-neutral maker rebate farming
-  setInterval(makerRebateMonitor,  5_000); // MR fill checker
+  // setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — paused
+  // setInterval(clobImbalanceCheck,    500); // TIER 4 — paused
+  // setInterval(makerRebateCheck,   10_000); // TIER 5 — paused
+  // setInterval(makerRebateMonitor,  5_000); // paused
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
   setInterval(fadeCheck,        2_000);  // disabled inside
