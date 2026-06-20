@@ -16,6 +16,7 @@ import { ContrarianSniper } from "./strategies/contrarian.js";
 import { FadeMomentum } from "./strategies/fadeMomentum.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { startLiqFeed, stopLiqFeed, onLiquidationCascade } from "./live/liqFeed.js";
+import { startFuturesFeed, stopFuturesFeed, getOIDelta, getFundingData } from "./live/futuresFeed.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -178,7 +179,7 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, lbStats, osStats, sweepStats, sniperStats, sniper, usdcBalance,
+  activePositions, stats, lemStats, lbStats, osStats, fsStats, sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance, expiredBuf,
   wsConnected, wsLastUpdate, wsMarkets,
 }) {
@@ -248,6 +249,13 @@ function render({
           out.push(row(
             `${C.cyan}${s.asset}${C.reset} ${C.bgreen}OS ${s.side}${C.reset}  ` +
             `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${dPct}  oracle pending  ` +
+            `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
+          ));
+        } else if (pos.fundingSnipe) {
+          const fPct = pos.fsFundingRate != null ? ` fr=${(pos.fsFundingRate * 100).toFixed(4)}%` : "";
+          out.push(row(
+            `${C.cyan}${s.asset}${C.reset} ${C.yellow}FS ${s.side}${C.reset}  ` +
+            `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${fPct}  ${fmtDuration(s.remainingMs)} left  ` +
             `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
           ));
         } else if (pos.latencyBond) {
@@ -330,18 +338,41 @@ function render({
   }
 
   out.push(row(""));
+  out.push(sec("FUNDINGSNIPE  (extreme perp funding → opposite squeeze, ≤0.58 ask)"));
+  const fsTotal = fsStats.won + fsStats.lost;
+  const fsWr    = fsTotal > 0 ? `${Math.round((fsStats.won / fsTotal) * 100)}%` : "--";
+  const fsPnl   = fsStats.totalPayout - fsStats.totalSpent;
+
+  // Show live funding rates for BTC / ETH / SOL
+  const fRates = ["BTC", "ETH", "SOL"].map(a => {
+    const d = getFundingData(a);
+    if (!d) return `${a}:--`;
+    const r = (d.rate * 100).toFixed(4);
+    const clr = d.rate > 0.0004 ? C.bred : d.rate < -0.0002 ? C.bgreen : C.dim;
+    return `${clr}${a}:${d.rate >= 0 ? "+" : ""}${r}%${C.reset}`;
+  }).join("  ");
+  out.push(row(`Rates: ${fRates}  │  Entered: ${fsStats.entered}  │  Won: ${C.green}${fsStats.won}${C.reset}  │  Lost: ${C.red}${fsStats.lost}${C.reset}  │  WR: ${fsTotal > 0 ? C.bgreen : C.dim}${fsWr}${C.reset}`));
+  if (fsStats.entered > 0) {
+    const pnlClr = fsPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${fsPnl >= 0 ? "+" : ""}${fmtUsd(fsPnl)}${C.reset}  │  Spent: ${fmtUsd(fsStats.totalSpent)}`));
+  } else {
+    out.push(row(`${C.dim}Watching BTC/ETH/SOL/XRP/DOGE/AVAX/LINK/MATIC funding for extreme readings...${C.reset}`));
+  }
+
+  out.push(row(""));
   out.push(sec("RECENT COMPLETED"));
   const recentAll = [
     ...stats.history.slice(0, 2).map((s) => ({ ...s, _src: "arb" })),
     ...lbStats.history.slice(0, 3).map((s) => ({ ...s, _src: "lb" })),
     ...osStats.history.slice(0, 3).map((s) => ({ ...s, _src: "os" })),
+    ...fsStats.history.slice(0, 2).map((s) => ({ ...s, _src: "fs" })),
   ].sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0)).slice(0, 6);
   if (recentAll.length === 0) {
     out.push(row(`${C.dim}None yet${C.reset}`));
   } else {
     for (const s of recentAll) {
-      if (s._src === "os" || s._src === "lb") {
-        const tag  = s._src === "os" ? "OS" : "LB";
+      if (s._src === "os" || s._src === "lb" || s._src === "fs") {
+        const tag  = s._src === "os" ? "OS" : s._src === "fs" ? "FS" : "LB";
         const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
         const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
         out.push(row(
@@ -448,6 +479,7 @@ async function main() {
   const openStats     = new DirectionalStats();  // market open front-run (disabled)
   const lbStats       = new DirectionalStats();  // latency bond — primary strategy
   const osStats       = new DirectionalStats();  // oracle snipe — post-close resolution lag
+  const fsStats       = new DirectionalStats();  // funding snipe — extreme perp funding squeeze
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
@@ -625,6 +657,7 @@ async function main() {
   // Liquidation cascade — disabled, directional entries underperform live
   onLiquidationCascade(() => { return; });
   startLiqFeed();
+  startFuturesFeed();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -1125,8 +1158,13 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.70) continue;  // Polymarket must still be lagging
 
+      // OI delta filter: declining OI = squeeze/unwind (weak signal), skip or reduce size
+      const oiDelta = getOIDelta(market.asset, 120_000);
+      if (oiDelta !== null && oiDelta < -0.003) continue; // OI shrinking ≥0.3% → skip
+      const oiMultiplier = oiDelta !== null && oiDelta > 0.005 ? 1.2 : 1.0; // OI growing → 20% bigger
+
       const betSize = dynamicBetSize(market.asset, 0.20,
-        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier());
+        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() * oiMultiplier);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       simBalance -= betSize;
@@ -1236,6 +1274,73 @@ async function main() {
     }
   };
 
+  // ── Strategy: FundingSnipe ────────────────────────────────────────────────
+  // When Binance perp funding rate is extreme, one side is overextended and a
+  // snap-back squeeze is imminent. Enter the OPPOSITE direction BEFORE Binance moves.
+  //   funding > +0.04%/8hr  → longs paying heavily → DOWN squeeze incoming
+  //   funding < -0.02%/8hr  → shorts paying heavily → UP squeeze incoming
+  // Enter at ≤0.58 ask (market hasn't priced the squeeze yet), 10% of balance.
+  // Runs every 30s — funding data refreshes on same schedule.
+  const _fsFired = new Set(); // marketId → prevent double entry
+  const fundingSnipeCheck = () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const remaining = market.endMs - now;
+      if (remaining < 60_000 || remaining > wm * 60_000 * 0.8) continue; // 60s-80% of window
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (_fsFired.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const f = getFundingData(market.asset);
+      if (!f) continue;
+
+      // Extreme thresholds — 0x8dxd notes: ±0.04% is 5× normal, near-certain squeeze
+      let side = null;
+      if (f.rate > 0.0004) side = "DOWN"; // longs paying → DOWN squeeze
+      if (f.rate < -0.0002) side = "UP";  // shorts paying → UP squeeze
+      if (!side) continue;
+
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.58) continue; // market hasn't priced the squeeze yet
+
+      // OI must also be elevated — confirms crowded position, not just noise
+      const oiDelta = getOIDelta(market.asset, 300_000); // 5-minute OI window
+      if (oiDelta !== null && oiDelta < 0) continue; // OI declining = unwind already started
+
+      const betSize = dynamicBetSize(market.asset, 0.10,
+        adaptive.getMultiplier(market.asset, "FUNDINGSNIPE") * getTimeMultiplier());
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      _fsFired.add(market.id);
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = lateEntry.getOpenPrice(market.id) ?? feeds[market.asset]?.get() ?? null;
+
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.fundingSnipe  = true;
+          pos.fsFundingRate = f.rate;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            fsStats.entered++;
+            console.error(`[fs] ${market.asset} ${side} @${ask.toFixed(3)}  funding=${(f.rate * 100).toFixed(4)}%  $${betSize.toFixed(2)}`);
+          } else { simBalance += betSize; _fsFired.delete(market.id); }
+        } catch { simBalance += betSize; _fsFired.delete(market.id); }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
   const monitor = async () => {
     if (isMonitoring) return;
     isMonitoring = true;
@@ -1280,6 +1385,11 @@ async function main() {
               logTrade(_tos); allTradeHistory.push(_tos);
               osStats.record(s);
               if (s.won !== null) adaptive.record(pos.asset, "ORACLESNIPE", s.won);
+            } else if (pos.fundingSnipe) {
+              const _tfs = { ...s, strategy: "FUNDINGSNIPE" };
+              logTrade(_tfs); allTradeHistory.push(_tfs);
+              fsStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "FUNDINGSNIPE", s.won);
             } else if (pos.latencyBond) {
               const _tlb = { ...s, strategy: "LATENCYBOND" };
               logTrade(_tlb); allTradeHistory.push(_tlb);
@@ -1378,6 +1488,8 @@ async function main() {
     fade:     { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
     latencybond:  { entered: lbStats.entered, won: lbStats.won, lost: lbStats.lost, totalSpent: lbStats.totalSpent, totalPayout: lbStats.totalPayout },
     oraclesnipe:  { entered: osStats.entered, won: osStats.won, lost: osStats.lost, totalSpent: osStats.totalSpent, totalPayout: osStats.totalPayout, buffered: expiredMarketBuf.size },
+    fundingsnipe: { entered: fsStats.entered, won: fsStats.won, lost: fsStats.lost, totalSpent: fsStats.totalSpent, totalPayout: fsStats.totalPayout },
+    funding: Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getFundingData(a)])),
     cascade:  { entered: cascadeStats.entered, won: cascadeStats.won, lost: cascadeStats.lost, totalSpent: cascadeStats.totalSpent, totalPayout: cascadeStats.totalPayout },
     spike:    { entered: spikeStats.entered, won: spikeStats.won, lost: spikeStats.lost, totalSpent: spikeStats.totalSpent, totalPayout: spikeStats.totalPayout },
     open:     { entered: openStats.entered, won: openStats.won, lost: openStats.lost, totalSpent: openStats.totalSpent, totalPayout: openStats.totalPayout },
@@ -1398,8 +1510,9 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(oracleSnipeCheck,   500);  // TIER 1 — post-close stale CLOB (99% WR)
-  setInterval(latencyBondCheck, 1_000);  // TIER 2 — Binance lag arb (was 5s, now 1s = 5× more signals)
+  setInterval(oracleSnipeCheck,    500);  // TIER 1 — post-close stale CLOB (99% WR)
+  setInterval(latencyBondCheck,  1_000);  // TIER 2 — Binance lag arb, OI-filtered
+  setInterval(fundingSnipeCheck, 30_000); // TIER 3 — extreme funding rate squeeze
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
   setInterval(fadeCheck,        2_000);  // disabled inside
@@ -1426,7 +1539,7 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, lbStats, osStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, lbStats, osStats, fsStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       expiredBuf: expiredMarketBuf.size,
       opportunities: getOpportunities(),
       now:           Date.now(),
@@ -1440,20 +1553,25 @@ async function main() {
   process.on("SIGINT", async () => {
     clobWs.close();
     stopLiqFeed();
+    stopFuturesFeed();
     for (const feed of Object.values(feeds)) feed.close();
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
     const lbPnl  = lbStats.totalPayout - lbStats.totalSpent;
     const osPnl  = osStats.totalPayout - osStats.totalSpent;
+    const fsPnl  = fsStats.totalPayout - fsStats.totalSpent;
     const lbWr   = (lbStats.won + lbStats.lost) > 0
       ? `${Math.round((lbStats.won  / (lbStats.won  + lbStats.lost))  * 100)}%` : "--";
     const osWr   = (osStats.won + osStats.lost) > 0
       ? `${Math.round((osStats.won  / (osStats.won  + osStats.lost))  * 100)}%` : "--";
+    const fsWr   = (fsStats.won + fsStats.lost) > 0
+      ? `${Math.round((fsStats.won  / (fsStats.won  + fsStats.lost))  * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
-      `ARB:          entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
-      `LATENCYBOND:  entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
-      `ORACLESNIPE:  entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
+      `ARB:           entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
+      `LATENCYBOND:   entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
+      `ORACLESNIPE:   entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
+      `FUNDINGSNIPE:  entered=${fsStats.entered}  won=${fsStats.won}  lost=${fsStats.lost}  WR=${fsWr}  P&L=${fmtUsd(fsPnl)}\n` +
       `Sim balance: ${fmtUsd(simBalance)} (saved)\n`
     );
     process.exit(0);
