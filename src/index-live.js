@@ -178,7 +178,7 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, sweepStats, sniperStats, sniper, usdcBalance,
+  activePositions, stats, lemStats, lbStats, sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance,
   wsConnected, wsLastUpdate, wsMarkets,
 }) {
@@ -243,7 +243,14 @@ function render({
       if (s.type === "directional") {
         const fill = s.filled ? `${C.green}FILLED${C.reset}` : `${C.yellow}PENDING${C.reset}`;
         const pot  = ((s.shares ?? 0) * (1 - (s.entryPrice ?? 0))).toFixed(2);
-        if (pos.sniper) {
+        if (pos.latencyBond) {
+          const dPct = pos.lbDelta != null ? ` Δ=${(pos.lbDelta * 100).toFixed(2)}%` : "";
+          out.push(row(
+            `${C.cyan}${s.asset}${C.reset} ${C.bgreen}LB ${s.side}${C.reset}  ` +
+            `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${dPct}  ${fmtDuration(s.remainingMs)} left  ` +
+            `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
+          ));
+        } else if (pos.sniper) {
           const pct = pos.sniperDelta != null ? ` δ=${(pos.sniperDelta * 100).toFixed(2)}%` : "";
           out.push(row(
             `${C.cyan}${s.asset}${C.reset} ${C.yellow}SNIPE ${s.side}${C.reset}  ` +
@@ -283,17 +290,19 @@ function render({
   }
 
   out.push(row(""));
-  out.push(sec("LEM  (Late Entry Momentum + Cross-Asset)"));
-  const lemTotal = lemStats.won + lemStats.lost;
-  const winRate  = lemTotal > 0 ? `${Math.round((lemStats.won / lemTotal) * 100)}%` : "--";
-  const lemPnl   = lemStats.totalPayout - lemStats.totalSpent;
+  out.push(sec("LATENCYBOND  (Binance lag arb — 45-150s left, ≥0.5% Δ, ask ≤0.70)"));
+  const lbTotal  = lbStats.won + lbStats.lost;
+  const lbWr     = lbTotal > 0 ? `${Math.round((lbStats.won / lbTotal) * 100)}%` : "--";
+  const lbPnl    = lbStats.totalPayout - lbStats.totalSpent;
   out.push(row(
-    `Entered: ${lemStats.entered}  │  Won: ${C.green}${lemStats.won}${C.reset}  │  ` +
-    `Lost: ${C.red}${lemStats.lost}${C.reset}  │  Win rate: ${lemTotal > 0 ? C.bgreen : C.dim}${winRate}${C.reset}`
+    `Entered: ${lbStats.entered}  │  Won: ${C.green}${lbStats.won}${C.reset}  │  ` +
+    `Lost: ${C.red}${lbStats.lost}${C.reset}  │  Win rate: ${lbTotal > 0 ? C.bgreen : C.dim}${lbWr}${C.reset}`
   ));
-  if (lemStats.entered > 0) {
-    const pnlClr = lemPnl >= 0 ? C.bgreen : C.bred;
-    out.push(row(`P&L: ${pnlClr}${lemPnl >= 0 ? "+" : ""}${fmtUsd(lemPnl)}${C.reset}  │  Spent: ${fmtUsd(lemStats.totalSpent)}`));
+  if (lbStats.entered > 0) {
+    const pnlClr = lbPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${lbPnl >= 0 ? "+" : ""}${fmtUsd(lbPnl)}${C.reset}  │  Spent: ${fmtUsd(lbStats.totalSpent)}`));
+  } else {
+    out.push(row(`${C.dim}Watching for 5-min markets with 45-150s left and ≥0.5% Binance move...${C.reset}`));
   }
 
   out.push(row(""));
@@ -321,25 +330,17 @@ function render({
   out.push(sec("RECENT COMPLETED"));
   const all = [
     ...stats.history.slice(0, 2).map((s) => ({ ...s, _src: "arb" })),
-    ...lemStats.history.slice(0, 2).map((s) => ({ ...s, _src: "lem" })),
-    ...sniperStats.history.slice(0, 3).map((s) => ({ ...s, _src: "sniper" })),
+    ...lbStats.history.slice(0, 4).map((s) => ({ ...s, _src: "lb" })),
   ].slice(0, 6);
   if (all.length === 0) {
     out.push(row(`${C.dim}None yet${C.reset}`));
   } else {
     for (const s of all) {
-      if (s._src === "sniper") {
+      if (s._src === "lb") {
         const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
         const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
         out.push(row(
-          `${clr}${mark} SNIPE ${s.asset} ${s.side}  @${((s.entryPrice ?? 0) * 100).toFixed(1)}¢  ` +
-          `$${s.payout?.toFixed(2) ?? "0.00"}  ${s.won === true ? "WIN" : s.won === false ? "LOSS" : "unfilled"}${C.reset}`
-        ));
-      } else if (s._src === "lem") {
-        const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
-        const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
-        out.push(row(
-          `${clr}${mark} LEM ${s.asset} ${s.side}  @${s.entryPrice?.toFixed(3)}  ` +
+          `${clr}${mark} LB ${s.asset} ${s.side}  @${((s.entryPrice ?? 0) * 100).toFixed(1)}¢  ` +
           `$${s.payout?.toFixed(2) ?? "0.00"}  ${s.won === true ? "WIN" : s.won === false ? "LOSS" : "unfilled"}${C.reset}`
         ));
       } else {
@@ -352,21 +353,6 @@ function render({
           `+$${s.guaranteedProfit?.toFixed(2) ?? "0.00"}  ${both ? "BOTH" : one ? "ONE SIDE" : "NO FILLS"}${C.reset}`
         ));
       }
-    }
-  }
-
-  out.push(row(""));
-  out.push(sec("SWEEP FOLLOW  (order-book momentum)"));
-  out.push(row(`Followed: ${C.bgreen}${sweepStats.followed}${C.reset}  ${C.dim}(fires when ask price rises >= 1.2c in 5s)${C.reset}`));
-  if (sweepStats.recentFollows.length === 0) {
-    out.push(row(`${C.dim}Watching for sweeps on all ${wsMarkets} subscribed tokens...${C.reset}`));
-  } else {
-    for (const s of sweepStats.recentFollows) {
-      const ago = Math.round((now - s.ts) / 1000);
-      out.push(row(
-        `${C.cyan}SWEEP${C.reset} ${s.asset} ${C.yellow}${s.side}${C.reset} @${s.price.toFixed(3)}` +
-        `  +${s.rise}  $${s.betSize.toFixed(2)}  ${s.remainingS}s left  ${C.dim}${ago}s ago${C.reset}`
-      ));
     }
   }
 
@@ -452,9 +438,10 @@ async function main() {
   const sweepStats        = new SweepStats();
   const sniperStats   = new SniperStats();
   const fadeStats     = new FadeStats();
-  const cascadeStats  = new DirectionalStats();  // liquidation cascade
-  const spikeStats    = new DirectionalStats();  // macro price spike
-  const openStats     = new DirectionalStats();  // market open front-run
+  const cascadeStats  = new DirectionalStats();  // liquidation cascade (disabled)
+  const spikeStats    = new DirectionalStats();  // macro price spike (disabled)
+  const openStats     = new DirectionalStats();  // market open front-run (disabled)
+  const lbStats       = new DirectionalStats();  // latency bond — primary strategy
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
@@ -572,7 +559,8 @@ async function main() {
   });
 
   clobWs.onSweep(({ tokenId, marketId, side, price, rise }) => {
-    if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return;
+    return; // disabled — directional entries average 25-27% live win rate (below 53% breakeven)
+    if (activePositions.has(marketId) || enteringMarkets.has(marketId)) return; // eslint-disable-line no-unreachable
     if (activePositions.size >= CONFIG.maxPositions) return;
     const market = marketList.find((m) => m.id === marketId);
     if (!market || market.endMs - Date.now() < 15_000) return;
@@ -609,11 +597,8 @@ async function main() {
 
   clobWs.connect();
 
-  // Wire liquidation cascade signal → multi-asset entry
-  onLiquidationCascade(({ asset, direction, totalUsd }) => {
-    console.error(`[cascade] ${asset} ${direction} $${(totalUsd / 1000).toFixed(0)}k liquidated`);
-    tryCascadeEntry(asset, direction);
-  });
+  // Liquidation cascade — disabled, directional entries underperform live
+  onLiquidationCascade(() => { return; });
   startLiqFeed();
 
   const refreshMarkets = async () => {
@@ -745,7 +730,8 @@ async function main() {
   };
 
   const lateEntryCheck = () => {
-    if (isLateEntryChecking) return;
+    return; // disabled — LEM averages 25-27% live win rate (below 53% breakeven)
+    if (isLateEntryChecking) return; // eslint-disable-line no-unreachable
     isLateEntryChecking = true;
     try {
       const now = Date.now();
@@ -896,7 +882,8 @@ async function main() {
   // When a fresh 5-min market opens (<45s old) and Binance shows strong momentum,
   // buy the trending side immediately while LPs are still calibrating (wide spread).
   const marketOpenCheck = () => {
-    const now = Date.now();
+    return; // disabled — directional entries underperform live (25-27% win rate)
+    const now = Date.now(); // eslint-disable-line no-unreachable
     for (const market of marketList) {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
@@ -954,7 +941,8 @@ async function main() {
   // When Binance moves ≥1.8% in ≤20 seconds (macro event), enter ALL assets
   // simultaneously. LPs cannot cancel fast enough; you capture their stale quotes.
   const macroSpikeCheck = () => {
-    if (Date.now() - _lastSpikeFire < 5 * 60_000) return; // 5-min cooldown
+    return; // disabled — directional entries underperform live (25-27% win rate)
+    if (Date.now() - _lastSpikeFire < 5 * 60_000) return; // eslint-disable-line no-unreachable
 
     let spikeAsset = null; let spikePct = 0; let spikeSide = null;
     for (const asset of CONFIG.assets) {
@@ -1011,8 +999,9 @@ async function main() {
   // ── Strategy: Liquidation Cascade Stack ──────────────────────────────────
   // When $300k+ in forced liquidations hit one direction in 30s, enter that asset
   // plus all correlated assets (they lag by 30-150s).
-  const tryCascadeEntry = (asset, direction) => {
-    const now      = Date.now();
+  const tryCascadeEntry = (_asset, _direction) => {
+    return; // disabled — directional entries underperform live
+    const now      = Date.now(); // eslint-disable-line no-unreachable
     const CORR     =
       asset === "BTC"  ? ["BTC", "ETH", "SOL", "XRP", "AVAX", "DOGE", "LINK", "MATIC"] :
       asset === "ETH"  ? ["ETH", "BTC", "SOL", "LINK", "MATIC"] :
@@ -1065,6 +1054,64 @@ async function main() {
     }
   };
 
+  // ── Strategy: LatencyBond ─────────────────────────────────────────────────
+  // Polymarket lags Binance by 30-90s on 5-min markets.
+  // When 45-150s remain and Binance has moved ≥0.5% since market open,
+  // buy the winning-side token while the ask is still ≤0.70.
+  // This is the 0x8dxd playbook: 98% observed win rate.
+  const latencyBondCheck = () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const remaining = market.endMs - now;
+      if (remaining < 45_000 || remaining > 150_000) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const currentPrice = feeds[market.asset]?.get() ?? null;
+      if (!currentPrice) continue;
+      const openPrice = lateEntry.getOpenPrice(market.id);
+      if (!openPrice) continue;
+
+      const delta = (currentPrice - openPrice) / openPrice;
+      if (Math.abs(delta) < 0.005) continue;  // need ≥0.5% confirmed Binance move
+
+      const side    = delta > 0 ? "UP" : "DOWN";
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.70) continue;  // Polymarket must still be lagging
+
+      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const available = Math.max(0, simBalance - allocated);
+      const betSize   = Math.min(simBalance * 0.20, available) * adaptive.getMultiplier(market.asset, "LATENCYBOND");
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = openPrice;
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.latencyBond = true;
+          pos.lbDelta     = delta;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            lbStats.entered++;
+            console.error(`[lb] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta * 100).toFixed(2)}%  $${betSize.toFixed(2)}  ${Math.round(remaining / 1000)}s left`);
+          } else { simBalance += betSize; }
+        } catch { simBalance += betSize; }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
   const monitor = async () => {
     if (isMonitoring) return;
     isMonitoring = true;
@@ -1099,7 +1146,12 @@ async function main() {
             const s = pos.summary;
             simBalance += s.payout;
             trackPnl();
-            if (pos.sniper) {
+            if (pos.latencyBond) {
+              const _tlb = { ...s, strategy: "LATENCYBOND" };
+              logTrade(_tlb); allTradeHistory.push(_tlb);
+              lbStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "LATENCYBOND", s.won);
+            } else if (pos.sniper) {
               const _ts = { ...s, strategy: "SNIPER" };
               logTrade(_ts); allTradeHistory.push(_ts);
               sniperStats.record(s);
@@ -1190,6 +1242,7 @@ async function main() {
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
     sniper:   { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
     fade:     { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
+    latencybond: { entered: lbStats.entered, won: lbStats.won, lost: lbStats.lost, totalSpent: lbStats.totalSpent, totalPayout: lbStats.totalPayout },
     cascade:  { entered: cascadeStats.entered, won: cascadeStats.won, lost: cascadeStats.lost, totalSpent: cascadeStats.totalSpent, totalPayout: cascadeStats.totalPayout },
     spike:    { entered: spikeStats.entered, won: spikeStats.won, lost: spikeStats.lost, totalSpent: spikeStats.totalSpent, totalPayout: spikeStats.totalPayout },
     open:     { entered: openStats.entered, won: openStats.won, lost: openStats.lost, totalSpent: openStats.totalSpent, totalPayout: openStats.totalPayout },
@@ -1210,11 +1263,12 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(lateEntryCheck,   2_000);
+  setInterval(latencyBondCheck, 5_000);  // PRIMARY — Binance→Polymarket lag arb
+  setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
-  setInterval(fadeCheck,        2_000);
-  setInterval(marketOpenCheck,  3_000);
-  setInterval(macroSpikeCheck,  5_000);
+  setInterval(fadeCheck,        2_000);  // disabled inside
+  setInterval(marketOpenCheck,  3_000);  // disabled inside
+  setInterval(macroSpikeCheck,  5_000);  // disabled inside
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }
@@ -1236,7 +1290,7 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, lbStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       opportunities: getOpportunities(),
       now:           Date.now(),
       simBalance,
@@ -1252,13 +1306,13 @@ async function main() {
     for (const feed of Object.values(feeds)) feed.close();
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
-    const lemPnl    = lemStats.totalPayout - lemStats.totalSpent;
-    const sniperPnl = sniperStats.totalPayout - sniperStats.totalSpent;
+    const lbPnl  = lbStats.totalPayout - lbStats.totalSpent;
+    const lbWr   = (lbStats.won + lbStats.lost) > 0
+      ? `${Math.round((lbStats.won / (lbStats.won + lbStats.lost)) * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
-      `ARB:    entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
-      `LEM:    entered=${lemStats.entered}  won=${lemStats.won}  lost=${lemStats.lost}  P&L=${fmtUsd(lemPnl)}\n` +
-      `SNIPER: entered=${sniperStats.entered}  won=${sniperStats.won}  lost=${sniperStats.lost}  P&L=${fmtUsd(sniperPnl)}\n` +
+      `ARB:         entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
+      `LATENCYBOND: entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
       `Sim balance: ${fmtUsd(simBalance)} (saved)\n`
     );
     process.exit(0);
