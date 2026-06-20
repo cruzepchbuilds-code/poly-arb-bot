@@ -58,7 +58,7 @@ function getTokenIds(market) {
   return { upTokenId: null, downTokenId: null };
 }
 
-function normalizeSlugMarket(m, asset, windowEndMs) {
+function normalizeSlugMarket(m, asset, windowEndMs, windowMins = 5) {
   if (!m) return null;
   const endMs = safeTimeMs(m.endDate || m.endTime || m.resolutionTime) ?? windowEndMs;
   if (!endMs || endMs <= Date.now()) return null;
@@ -76,8 +76,8 @@ function normalizeSlugMarket(m, asset, windowEndMs) {
   return {
     id:          m.conditionId || m.id || tokens.upTokenId,
     asset,
-    question:    String(m.question || m.title || `${asset} Up or Down 5m`),
-    windowMins:  5,
+    question:    String(m.question || m.title || `${asset} Up or Down ${windowMins}m`),
+    windowMins,
     upTokenId:   tokens.upTokenId,
     downTokenId: tokens.downTokenId,
     endMs,
@@ -86,7 +86,7 @@ function normalizeSlugMarket(m, asset, windowEndMs) {
   };
 }
 
-// ── 5-min crypto markets ────────────────────────────────────────────────────
+// ── 5-min and 10-min crypto markets ─────────────────────────────────────────
 
 let _marketsCache = [];
 let _marketsCachedAt = 0;
@@ -95,24 +95,33 @@ export async function fetchAll5minMarkets() {
   if (Date.now() - _marketsCachedAt < 15_000) return _marketsCache;
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const currentEnd = Math.ceil(nowSec / 300) * 300;
-  const windows = [currentEnd, currentEnd + 300, currentEnd + 600];
+
+  // 5-minute windows (300s boundaries)
+  const end5 = Math.ceil(nowSec / 300) * 300;
+  const windows5m = [end5, end5 + 300, end5 + 600];
+
+  // 10-minute windows (600s boundaries)
+  const end10 = Math.ceil(nowSec / 600) * 600;
+  const windows10m = [end10, end10 + 600, end10 + 1200];
 
   const fetches = [];
   for (const [asset, prefixes] of Object.entries(ASSET_PREFIXES)) {
     for (const prefix of prefixes) {
-      for (const windowEnd of windows) {
-        fetches.push({ asset, slug: `${prefix}-updown-5m-${windowEnd}`, windowEndMs: windowEnd * 1000 });
+      for (const windowEnd of windows5m) {
+        fetches.push({ asset, slug: `${prefix}-updown-5m-${windowEnd}`, windowEndMs: windowEnd * 1000, windowMins: 5 });
+      }
+      for (const windowEnd of windows10m) {
+        fetches.push({ asset, slug: `${prefix}-updown-10m-${windowEnd}`, windowEndMs: windowEnd * 1000, windowMins: 10 });
       }
     }
   }
 
   const settled = await Promise.allSettled(
-    fetches.map(({ asset, slug, windowEndMs }) =>
+    fetches.map(({ asset, slug, windowEndMs, windowMins }) =>
       fetchEventBySlug(slug).then(events =>
         events.flatMap(ev =>
           (ev.markets ?? []).flatMap(m => {
-            const n = normalizeSlugMarket(m, asset, windowEndMs);
+            const n = normalizeSlugMarket(m, asset, windowEndMs, windowMins);
             return n ? [n] : [];
           })
         )

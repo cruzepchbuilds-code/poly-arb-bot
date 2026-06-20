@@ -1622,7 +1622,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 30_000 || remaining > wm * 55_000) continue;
+      if (remaining < 20_000 || remaining > wm * 55_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (_ciEntered.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
