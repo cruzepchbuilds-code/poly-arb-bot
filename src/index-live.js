@@ -1585,10 +1585,10 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.90) continue; // must still be underpriced
 
-      // Certain entries get a 1.15× boost (guaranteed winner = more conviction)
-      const certainMult = certain ? 1.15 : 1.0;
+      // UMA/gamma confirmed = near-100% certainty — bet significantly more
+      const certainMult = certain ? 1.75 : 1.0;
       const betSize = dynamicBetSize(market.asset, 0.20,
-        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier() * certainMult); // 20% (95% WR)
+        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier() * certainMult); // 20% base (95% WR)
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _osEntered.add(id);
@@ -1829,8 +1829,8 @@ async function main() {
 
       const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
       if (!yesPrice || !noPrice) continue;
-      // ±10¢ from 50/50 — still genuinely two-sided, adverse selection risk stays low
-      if (Math.abs(yesPrice - 0.50) > 0.10 || Math.abs(noPrice - 0.50) > 0.10) continue;
+      // ±7¢ from 50/50 — enough expansion for volume, tight enough to limit adverse selection
+      if (Math.abs(yesPrice - 0.50) > 0.07 || Math.abs(noPrice - 0.50) > 0.07) continue;
 
       // Only block on extreme volume (genuine panic move, not routine flow)
       const spike = getVolumeSpike(market.asset);
