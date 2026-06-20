@@ -36,7 +36,7 @@ export const CONFIG = {
 
   kellyFraction:    0.25,
   estimatedWinRate: 0.55,
-  minBetUsdc:       0.5,
+  minBetUsdc:       1,
   maxBetPct:        0.08,
 
   maxTradeUsdc: Number(process.env.MAX_TRADE_USDC) || null,
