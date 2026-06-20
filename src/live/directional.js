@@ -18,6 +18,7 @@ export class DirectionalPosition {
     this.totalSpent = null;
     this.order      = null;
     this.filled     = false;
+    this.sizeFilled = 0;            // actual shares matched, per last order-status poll
     this.resolved   = false;
     this.won        = null;         // true | false | null (pending/unknown)
     this.payout     = 0;
@@ -50,18 +51,32 @@ export class DirectionalPosition {
     if (!this.order || this.filled) return;
     try {
       const s = await getOrderStatus(this.order.orderId);
-      if (s?.status === "matched") { this.filled = true; this._log("FILLED"); }
+      if (!s) return;
+      // Track actual matched size directly — relying on status === "matched" alone
+      // misses orders that filled (fully or partially) but the API reports some
+      // other live status before/without ever returning that exact string.
+      this.sizeFilled = Math.max(this.sizeFilled, s.sizeFilled ?? 0);
+      if (s.status === "matched" || (this.shares && this.sizeFilled >= this.shares)) {
+        this.filled = true;
+        this._log("FILLED");
+      }
     } catch { /* ignore */ }
   }
 
   // Called at window expiry — compare current vs open Binance price to determine win/loss.
+  // Settles strictly on actually-matched shares (this.sizeFilled), not the binary
+  // `filled` flag, so partial fills aren't mistaken for "never filled → full refund".
   resolveInSim(currentBinancePrice) {
     if (this.resolved) return;
     this.resolved = true;
 
-    if (!this.filled) {
+    const filledShares   = Math.max(this.sizeFilled, this.filled ? (this.shares ?? 0) : 0);
+    const unfilledShares = Math.max(0, (this.shares ?? 0) - filledShares);
+    const unfilledRefund = unfilledShares * (this.entryPrice ?? 0);
+
+    if (filledShares <= 0) {
       this.won    = null;
-      this.payout = this.totalSpent ?? 0; // full refund for unfilled
+      this.payout = this.totalSpent ?? 0; // genuinely never filled — full refund
       this._log("Expired unfilled → refunded");
       return;
     }
@@ -75,10 +90,10 @@ export class DirectionalPosition {
 
     const wentUp  = currentBinancePrice > this.binanceOpenPrice;
     this.won      = this.side === "UP" ? wentUp : !wentUp;
-    this.payout   = this.won ? this.shares * 1.0 : 0;
+    this.payout   = (this.won ? filledShares * 1.0 : 0) + unfilledRefund;
     const delta   = ((currentBinancePrice - this.binanceOpenPrice) / this.binanceOpenPrice * 100).toFixed(2);
     this._log(
-      `${this.won ? "WIN" : "LOSS"}  BTC ${wentUp ? "↑" : "↓"} ${delta}%  payout=$${this.payout.toFixed(2)}`
+      `${this.won ? "WIN" : "LOSS"}  ${filledShares}/${this.shares ?? filledShares}sh filled  ${wentUp ? "↑" : "↓"} ${delta}%  payout=$${this.payout.toFixed(2)}`
     );
   }
 
