@@ -681,6 +681,7 @@ async function main() {
   let simBalance          = loadSimState(CONFIG.paper.startBalance);
   let startBalance        = CONFIG.paper.startBalance;
   let _arbSeq             = 0;   // unique suffix for multi-ARB position IDs
+  const _mktArbCounts     = new Map(); // marketId → active ARB position count (O(1) hot-path lookup)
 
   // Load all past trades from disk for history table + chart reconstruction
   const allTradeHistory   = loadTrades().sort((a, b) => (a.enteredAt ?? 0) - (b.enteredAt ?? 0));
@@ -714,10 +715,9 @@ async function main() {
   };
 
   const kellySizeBet = (combined) => {
-    const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
-    const available = Math.max(0, simBalance - allocated); // simBalance already has _reservedUsdc deducted
-    const kelly     = available * ((1 - combined) / combined) * 1.5;
-    return Math.max(1, Math.min(kelly, available * 0.35));
+    // simBalance is already decremented by prior reservations — no need to recompute allocated
+    const kelly = simBalance * ((1 - combined) / combined) * 1.5;
+    return Math.max(1, Math.min(kelly, simBalance * 0.35));
   };
 
   const kellyBet = (entryPrice, confidence) => {
@@ -750,14 +750,11 @@ async function main() {
   let _reservedUsdc = 0;
 
   clobWs.onOpportunity((marketId, yesPrice, noPrice) => {
-    // Allow up to 5 concurrent ARB positions per market to sweep multiple book levels
-    const mktArbCount = [...activePositions.values()].filter(p => p.type === "window" && (p.marketId ?? p.id) === marketId).length;
-    if (mktArbCount >= 5 || enteringMarkets.has(marketId)) return;
+    if ((_mktArbCounts.get(marketId) ?? 0) >= 8 || enteringMarkets.has(marketId)) return;
     if (activePositions.size >= CONFIG.maxPositions) return;
     const market = marketList.find((m) => m.id === marketId) ?? arbMarketList.find((m) => m.id === marketId);
-    if (!market || market.endMs - Date.now() < 15_000) return;
+    if (!market || market.endMs - Date.now() < 10_000) return;
 
-    // Recheck with ask prices — mid shows gap but we fill at ask
     const askYes = clobWs.getAsk(market.upTokenId) ?? yesPrice;
     const askNo  = clobWs.getAsk(market.downTokenId) ?? noPrice;
     if (askYes + askNo >= getThreshold()) return;
@@ -779,6 +776,7 @@ async function main() {
         const entered = await pos.enter(askYes, askNo, bet);
         if (entered) {
           activePositions.set(posId, pos);
+          _mktArbCounts.set(market.id, (_mktArbCounts.get(market.id) ?? 0) + 1);
           stats.entered++;
           simBalance += bet - (pos.totalSpent ?? 0);
         } else {
@@ -872,8 +870,7 @@ async function main() {
     try {
       const t = getThreshold();
       for (const market of [...marketList, ...arbMarketList]) {
-        const mktArbCount = [...activePositions.values()].filter(p => p.type === "window" && (p.marketId ?? p.id) === market.id).length;
-        if (mktArbCount >= 5 || enteringMarkets.has(market.id)) continue;
+        if ((_mktArbCounts.get(market.id) ?? 0) >= 8 || enteringMarkets.has(market.id)) continue;
         if (activePositions.size >= CONFIG.maxPositions) break;
         const upAge   = clobWs.getAgeMs(market.upTokenId);
         const downAge = clobWs.getAgeMs(market.downTokenId);
@@ -908,6 +905,7 @@ async function main() {
           if (entered) {
             simBalance += bet - (pos.totalSpent ?? 0);
             activePositions.set(posId, pos);
+            _mktArbCounts.set(market.id, (_mktArbCounts.get(market.id) ?? 0) + 1);
             stats.entered++;
           } else { simBalance += bet; }
         } catch { simBalance += bet; } finally { _reservedUsdc -= bet; enteringMarkets.delete(market.id); }
@@ -2131,10 +2129,10 @@ async function main() {
             logTrade(s); allTradeHistory.push(s);
             stats.record(pos);
             const mktId = pos.marketId ?? id;
+            const remaining = Math.max(0, (_mktArbCounts.get(mktId) ?? 1) - 1);
+            _mktArbCounts.set(mktId, remaining);
             activePositions.delete(id);
-            // Only unsubscribe WS when the last ARB position for this market closes
-            const hasMore = [...activePositions.values()].some(p => (p.marketId ?? p.id) === mktId);
-            if (!hasMore) { clobWs.removeMarket(mktId); userWs?.removeMarket(mktId); }
+            if (remaining === 0) { clobWs.removeMarket(mktId); userWs?.removeMarket(mktId); }
           }
         }
       }
