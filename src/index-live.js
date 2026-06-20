@@ -683,7 +683,8 @@ async function main() {
   const kellySizeBet = (combined) => {
     // simBalance is already decremented by prior reservations — no need to recompute allocated
     const kelly = simBalance * ((1 - combined) / combined) * 1.5;
-    return Math.max(1, Math.min(kelly, simBalance * 0.35));
+    const tradeCap = CONFIG.maxTradeUsdc ?? Infinity;
+    return Math.max(1, Math.min(kelly, simBalance * 0.35, tradeCap));
   };
 
   const kellyBet = (entryPrice, confidence) => {
