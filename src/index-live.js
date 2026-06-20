@@ -22,6 +22,7 @@ import { getEventMultiplier, getCurrentEvent } from "./live/fedWatch.js";
 import { startWhaleFeed, stopWhaleFeed, getWhaleSignal } from "./live/whaleFeed.js";
 import { startDeribitFeed, stopDeribitFeed, getDeribitGamma } from "./live/deribitFeed.js";
 import { startUmaFeed, stopUmaFeed, getUmaSettlement, getUmaStats } from "./live/umaOracleFeed.js";
+import { startResearchAgent, stopResearchAgent } from "./research/agent.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -788,6 +789,7 @@ async function main() {
   startWhaleFeed();
   startDeribitFeed();
   startUmaFeed();
+  startResearchAgent();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -2128,6 +2130,7 @@ async function main() {
     stopWhaleFeed();
     stopDeribitFeed();
     stopUmaFeed();
+    stopResearchAgent();
     // Cancel all open maker-rebate orders before exit
     for (const [id] of _mrOrders) await cancelMakerOrders(id).catch(() => {});
     for (const feed of Object.values(feeds)) feed.close();
