@@ -925,7 +925,7 @@ async function main() {
     clobWs.addMarkets([...fresh, ...arbFresh]);
     userWs?.addMarkets([...fresh, ...arbFresh].map(m => m.id));
     marketList = fresh;
-    arbMarketList = arbFresh.filter(m => m.endMs > now);
+    arbMarketList = arbFresh.filter(m => m.endMs > now && m.endMs - now <= CONFIG.maxArbWindowMs);
   };
 
   const fallbackScan = async () => {

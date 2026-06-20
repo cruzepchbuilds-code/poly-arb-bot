@@ -33,6 +33,9 @@ export const CONFIG = {
 
   combinedThreshold: Number(process.env.COMBINED_THRESHOLD) || 0.98,
   makerArbThreshold: Number(process.env.MAKER_ARB_THRESHOLD) || 1.005,
+  // ARB capital must cycle fast to compound — don't let the broad market scan
+  // tie up funds in markets resolving weeks or months out.
+  maxArbWindowMs: Number(process.env.MAX_ARB_WINDOW_HOURS || 6) * 60 * 60 * 1000,
   momentumMinPct: 0.0002,
 
   kellyFraction:    0.25,

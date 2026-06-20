@@ -59,8 +59,12 @@ export class WindowPosition {
     // Equal shares — spend proportional dollars on each side
     // shares × (upPrice + downPrice) = maxUsdc
     this.shares = Math.floor(maxUsdc / (upPrice + downPrice));
-    if (this.shares < 1) {
-      this._log("Shares too small, skipping");
+    // Polymarket rejects orders below 5 shares or $1 notional per leg — check both
+    // before attempting, or every entry on a small account guarantees two failed
+    // orders that still get treated as a placed position downstream.
+    const minShares = Math.max(5, Math.ceil(1 / Math.min(upPrice, downPrice)));
+    if (this.shares < minShares) {
+      this._log(`Shares too small (${this.shares} < ${minShares} min), skipping`);
       return false;
     }
 
@@ -87,7 +91,7 @@ export class WindowPosition {
       this._log(`DOWN order [${this.downOrder.orderId}]`);
     } else { this._log(`DOWN order failed: ${dnResult.reason?.message}`); }
 
-    return true;
+    return !!(this.upOrder || this.downOrder);
   }
 
   // Poll fill status and run danger management
