@@ -1843,17 +1843,21 @@ async function main() {
         mrStats.entered++;
         const spent = ((mr.upOrder?.price ?? 0) * (mr.upOrder?.size ?? 0)) + ((mr.dnOrder?.price ?? 0) * (mr.dnOrder?.size ?? 0));
         simBalance -= spent;
-        // We own both tokens; at settlement one pays $1/share → net positive.
-        // Track as a simple profit event (don't need full position tracking since outcome is known).
         const upShares = mr.upOrder.size ?? 0;
         const dnShares = mr.dnOrder.size ?? 0;
-        const payout = ((upShares + dnShares) / 2) * 1.0; // expected value in a 50/50 market
+        const payout = ((upShares + dnShares) / 2) * 1.0;
         simBalance += payout;
         const net = payout - spent;
         mrStats.totalSpent  += spent;
         mrStats.totalPayout += payout;
-        if (net > 0) mrStats.won++; else mrStats.lost++;
+        const mrWon = net > 0;
+        if (mrWon) mrStats.won++; else mrStats.lost++;
         trackPnl();
+        const _tmr = { strategy: "MAKERREBATE", asset: mr.asset, side: "BOTH",
+          entryPrice: (upShares + dnShares) > 0 ? spent / (upShares + dnShares) : 0,
+          totalSpent: spent, payout, net, won: mrWon };
+        logTrade(_tmr); allTradeHistory.push(_tmr);
+        adaptive.record(mr.asset, "MAKERREBATE", mrWon);
         console.error(`[mr] ${mr.asset} BOTH FILLED  net=${net >= 0 ? "+" : ""}${net.toFixed(2)}`);
       } else if (upFilled && !dnFilled && now - mr.placedAt > 60_000) {
         // Only up filled after 60s — directional UP position, cancel the pending DN order
@@ -1864,6 +1868,9 @@ async function main() {
         simBalance -= filledCost;
         mrStats.totalSpent += filledCost;
         mrStats.entered++;
+        const _tmrUp = { strategy: "MAKERREBATE", asset: mr.asset, side: "UP",
+          entryPrice: mr.upOrder?.price ?? 0, totalSpent: filledCost, payout: 0, net: -filledCost, won: false };
+        logTrade(_tmrUp); allTradeHistory.push(_tmrUp);
       } else if (dnFilled && !upFilled && now - mr.placedAt > 60_000) {
         const { cancelOrder: co } = await import("./live/orders.js");
         await co(mr.upOrder?.orderId).catch(() => {});
@@ -1872,6 +1879,9 @@ async function main() {
         simBalance -= filledCost;
         mrStats.totalSpent += filledCost;
         mrStats.entered++;
+        const _tmrDn = { strategy: "MAKERREBATE", asset: mr.asset, side: "DOWN",
+          entryPrice: mr.dnOrder?.price ?? 0, totalSpent: filledCost, payout: 0, net: -filledCost, won: false };
+        logTrade(_tmrDn); allTradeHistory.push(_tmrDn);
       }
     }
   };
