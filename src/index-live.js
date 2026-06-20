@@ -1596,7 +1596,8 @@ async function main() {
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask > 0.90) continue; // must still be underpriced
+      const askCap = certain ? 0.90 : 0.82;
+      if (ask == null || ask > askCap) continue; // must still be underpriced
 
       // UMA/gamma confirmed = near-100% certainty — bet significantly more
       const certainMult = certain ? 1.75 : 1.0;
@@ -1754,18 +1755,22 @@ async function main() {
       const dnImb = clobWs.getImbalance(market.downTokenId);
       if (upImb == null && dnImb == null) continue;
 
+      // Confluence check first — confluent entries use lower imbalance threshold (0.70 vs 0.80 standalone)
+      const conf = _confluentMarkets.get(market.id);
+      const confSide = conf && (now - (conf?.lbTs ?? 0)) < 3_000 ? conf.side : null;
+
       let side = null;
       let imbalance = 0;
-      if ((upImb ?? 0) > 0.70 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
-      else if ((dnImb ?? 0) > 0.70)                             { side = "DOWN"; imbalance = dnImb; }
+      const upThresh = confSide === "UP"   ? 0.70 : 0.80;
+      const dnThresh = confSide === "DOWN" ? 0.70 : 0.80;
+      if ((upImb ?? 0) > upThresh && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
+      else if ((dnImb ?? 0) > dnThresh)                             { side = "DOWN"; imbalance = dnImb; }
       if (!side) continue;
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
 
-      // Confluence: LB fired on this market in the last 3s with matching direction
-      const conf = _confluentMarkets.get(market.id);
-      const isConfluent = conf?.side === side && (now - (conf?.lbTs ?? 0)) < 3_000;
+      const isConfluent = confSide === side;
       const askCap = isConfluent ? 0.75 : 0.65;
       if (ask == null || ask > askCap) continue;
 
@@ -1918,8 +1923,8 @@ async function main() {
         logTrade(_tmr); allTradeHistory.push(_tmr);
         adaptive.record(mr.asset, "MAKERREBATE", mrWon);
         console.error(`[mr] ${mr.asset} BOTH FILLED  net=${net >= 0 ? "+" : ""}${net.toFixed(2)}`);
-      } else if (upFilled && !dnFilled && now - mr.placedAt > 60_000) {
-        // Only up filled after 60s — directional UP position, cancel the pending DN order
+      } else if (upFilled && !dnFilled && now - mr.placedAt > 30_000) {
+        // Only up filled after 30s — directional UP position, cancel the pending DN order
         const { cancelOrder: co } = await import("./live/orders.js");
         await co(mr.dnOrder?.orderId).catch(() => {});
         _mrOrders.delete(id);
@@ -1930,7 +1935,7 @@ async function main() {
         const _tmrUp = { strategy: "MAKERREBATE", asset: mr.asset, side: "UP",
           entryPrice: mr.upOrder?.price ?? 0, totalSpent: filledCost, payout: 0, net: -filledCost, won: false };
         logTrade(_tmrUp); allTradeHistory.push(_tmrUp);
-      } else if (dnFilled && !upFilled && now - mr.placedAt > 60_000) {
+      } else if (dnFilled && !upFilled && now - mr.placedAt > 30_000) {
         const { cancelOrder: co } = await import("./live/orders.js");
         await co(mr.upOrder?.orderId).catch(() => {});
         _mrOrders.delete(id);

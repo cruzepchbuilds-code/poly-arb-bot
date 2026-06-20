@@ -672,34 +672,40 @@ function setupCrosshair(svg,hist,tx,ty,startV,W,H,pT,pB,pR,pL) {
 }
 
 var STRATS=[
-  {key:'opensnipe',   name:'Opening Snipe',   abbr:'OPS', tier:'TIER 0', tc:'t0', desc:'Buys within 5–25s of market open when Binance moves ≥0.3%. Carry 1.35×, cross-asset ETH↔BTC 1.15×.'},
-  {key:'oraclesnipe', name:'Oracle Snipe',    abbr:'OS',  tier:'TIER 1', tc:'t1', desc:'Post-close stale CLOB. UMA on-chain oracle + gamma API confirmation. 1.15× certainty multiplier.'},
-  {key:'latencybond', name:'Latency Bond',    abbr:'LB',  tier:'TIER 2', tc:'t2', desc:'Binance price lag arb 30–90s before expiry. Enter winning side at ask ≤0.70. OI + volume filtered.'},
-  {key:'fundingsnipe',name:'Funding Snipe',   abbr:'FS',  tier:'TIER 3', tc:'t3', desc:'Extreme perp funding (>+0.04%/8h or <−0.02%). Deribit gamma cross-validated + buy-pressure aligned.'},
-  {key:'clobimb',     name:'CLOB Imbalance',  abbr:'CI',  tier:'TIER 4', tc:'t4', desc:'Order book bid depth >80% → buy before reprice. 20s min remaining. Adaptive ARB threshold 0.95.'},
-  {key:'makerrebate', name:'Maker Rebate',    abbr:'MR',  tier:'TIER 5', tc:'t5', desc:'Market-neutral limit orders on 50/50 markets. Earn 0.45% rebate per fill regardless of outcome.'},
-  {key:'arb',         name:'Cross-Mkt Arb',   abbr:'ARB', tier:'ARB',    tc:'ta', desc:'Buy both YES+NO when combined < threshold. Guaranteed profit when both fill at expiry.'},
+  {key:'opensnipe',   name:'Opening Snipe',   abbr:'OPS', tier:'TIER 0', tc:'t0', ev:'+4–8%',   edge:'STRONG',   bewr:'51%', desc:'First 3–35s of market open. Buy when Binance moves ≥0.8% in 60s + trend confirm. Ask ≤0.52. Stop-loss −30%.'},
+  {key:'oraclesnipe', name:'Oracle Snipe',    abbr:'OS',  tier:'TIER 1', tc:'t1', ev:'+6–12%',  edge:'STRONG',   bewr:'84%', desc:'Post-close stale CLOB. UMA on-chain + gamma confirmation = near-100% certainty. 1.75× bet multiplier. Unconfirmed ask ≤0.82, confirmed ask ≤0.90.'},
+  {key:'latencybond', name:'Latency Bond',    abbr:'LB',  tier:'TIER 2', tc:'t2', ev:'+3–6%',   edge:'STRONG',   bewr:'58%', desc:'Binance leads Polymarket 30–90s. Enter when BTC moves $70+ (or asset equiv). Ask lag zone 0.45–0.70. Stop-loss −30%.'},
+  {key:'fundingsnipe',name:'Funding Snipe',   abbr:'FS',  tier:'TIER 3', tc:'t3', ev:'+5–10%',  edge:'GOOD',     bewr:'60%', desc:'Extreme perp funding (>+0.04%/8h or <−0.02%) predicts short-term squeeze. Ask ≤0.58. Deribit gamma + buy-pressure aligned.'},
+  {key:'clobimb',     name:'CLOB Imbalance',  abbr:'CI',  tier:'TIER 4', tc:'t4', ev:'+2–4%',   edge:'GOOD',     bewr:'68%', desc:'Bid depth >80% standalone (>70% with LB confluence) → buy before reprice. Ask ≤0.65 standalone, ≤0.75 confluent. Stop-loss −30%.'},
+  {key:'makerrebate', name:'Maker Rebate',    abbr:'MR',  tier:'TIER 5', tc:'t5', ev:'+1.4%',   edge:'MARGINAL', bewr:'N/A', desc:'Market-neutral limit orders on 50/50 markets. Earn +0.45% maker rebate per fill. 30s partial-fill timeout. ~1.4% net per round trip.'},
+  {key:'arb',         name:'Cross-Mkt Arb',   abbr:'ARB', tier:'ARB',    tc:'ta', ev:'+0.24%',  edge:'LOCKED',   bewr:'N/A', desc:'Buy YES+NO when combined ask < 0.98. Guaranteed $1 at settlement if both fill. Zero market risk.'},
 ];
 
 function renderStrategies() {
   var grid=g('strat-grid'); if(!grid) return;
+  var edgeCl={'STRONG':'#22c55e','GOOD':'#f59e0b','MARGINAL':'#f97316','LOCKED':'#60a5fa'};
   grid.innerHTML=STRATS.map(function(st){
     var s=S[st.key]||{}, won=s.won||0, lost=s.lost||0, ent=s.entered||0;
     var wrv=wr(won,lost), p=st.key==='arb'?(s.guaranteedProfit||0):pnlOf(s);
     var pCl=pCls(p), wrPct=wrv!=null?fp(wrv):'—';
     var wrW=wrv!=null?(wrv*100):0, wrc=wrv==null?'':wrv>=0.62?'':'wr-fill'+(wrv>=0.50?' warn':' bad');
+    var ec=edgeCl[st.edge]||'#888';
+    var edgeBadge='<span style="display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:800;letter-spacing:.05em;background:'+ec+'22;color:'+ec+';border:1px solid '+ec+'55">'+st.edge+'</span>';
+    var evLine='<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'+edgeBadge+'<span style="font-size:11px;color:var(--t2);font-weight:700">EV '+st.ev+'</span><span style="font-size:10px;color:var(--t3)">BE-WR: '+st.bewr+'</span></div>';
     var pLine=st.key==='arb'?
       '<div><div class="ssi-lbl">Guaranteed Profit</div><div class="ssi-val pos">'+fu(s.guaranteedProfit||0)+'</div></div>':
       '<div><div class="ssi-lbl">Net P&amp;L</div><div class="ssi-val '+pCl+'">'+fuS(p)+'</div></div>';
     return '<div class="sc sc-'+st.tc+'">'+
       '<div class="tier '+st.tc+'">'+st.tier+'</div>'+
       '<div class="sc-name">'+st.abbr+' — '+st.name+'</div>'+
+      evLine+
       '<div class="sc-desc">'+st.desc+'</div>'+
       '<div class="sc-stats">'+
         '<div><div class="ssi-lbl">Entered</div><div class="ssi-val">'+ent+'</div></div>'+
         '<div><div class="ssi-lbl">Won / Lost</div><div class="ssi-val"><span class="pos">'+won+'</span> / <span class="neg">'+lost+'</span></div></div>'+
         '<div><div class="ssi-lbl">Win Rate</div><div class="ssi-val '+(wrv!=null?(wrv>=0.62?'pos':wrv>=0.50?'zero':'neg'):'')+'">'+wrPct+'</div><div class="wr-track"><div class="wr-fill '+wrc+'" style="width:'+wrW+'%"></div></div></div>'+
         pLine+
+        '<div><div class="ssi-lbl">Fee (taker)</div><div class="ssi-val" style="color:var(--t3)">1.80%</div></div>'+
       '</div></div>';
   }).join('');
   var pr=g('strat-pnl-row');
