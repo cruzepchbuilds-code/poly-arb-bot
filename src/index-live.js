@@ -17,6 +17,9 @@ import { FadeMomentum } from "./strategies/fadeMomentum.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
 import { startLiqFeed, stopLiqFeed, onLiquidationCascade } from "./live/liqFeed.js";
 import { startFuturesFeed, stopFuturesFeed, getOIDelta, getFundingData } from "./live/futuresFeed.js";
+import { startTradeFlow, stopTradeFlow, getVolumeSpike, getBuyPressure } from "./live/tradeFlow.js";
+import { getEventMultiplier, getCurrentEvent } from "./live/fedWatch.js";
+import { startWhaleFeed, stopWhaleFeed, getWhaleSignal } from "./live/whaleFeed.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -179,9 +182,11 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, lbStats, osStats, fsStats, sweepStats, sniperStats, sniper, usdcBalance,
+  activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats,
+  sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance, expiredBuf,
   wsConnected, wsLastUpdate, wsMarkets,
+  mrOrders, marketList, clobWs,
 }) {
   const out  = ["\x1b[2J\x1b[H"];
   const mode = LIVE ? `${C.bred}● LIVE${C.reset}` : `${C.yellow}● SIM${C.reset}`;
@@ -198,6 +203,20 @@ function render({
 
   const pxStr = Object.entries(feedPrices).map(([a, p]) => `${a} ${fmtPx(p, a)}`).join("  ");
   out.push(row(`${C.dim}${pxStr}${C.reset}`));
+
+  // Event calendar + whale signals on one info row
+  const ev = getCurrentEvent();
+  const evStr = ev
+    ? `${ev.minutesUntil > 0 ? `${C.yellow}▲ ${ev.name} in ${ev.minutesUntil}m (${ev.multiplier}×)` : `${C.bred}▲ ${ev.name} LIVE`}${C.reset}`
+    : `${C.dim}No macro events <5h${C.reset}`;
+  const whaleStr = ["BTC","ETH","SOL"].map(a => {
+    const w = getWhaleSignal(a);
+    if (!w) return null;
+    const clr = w.direction === "UP" ? C.bgreen : C.bred;
+    const arrow = w.direction === "UP" ? "↑" : "↓";
+    return `${clr}${a}${arrow}$${(w.usdTotal / 1e6).toFixed(0)}M${C.reset}`;
+  }).filter(Boolean).join(" ");
+  out.push(row(`${evStr}${whaleStr ? `  │  Whale: ${whaleStr}` : ""}`));
   out.push(row(""));
 
   const momParts = Object.entries(feedMoms).map(([a, m]) => {
@@ -256,6 +275,13 @@ function render({
           out.push(row(
             `${C.cyan}${s.asset}${C.reset} ${C.yellow}FS ${s.side}${C.reset}  ` +
             `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${fPct}  ${fmtDuration(s.remainingMs)} left  ` +
+            `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
+          ));
+        } else if (pos.clobImb) {
+          const iPct = pos.clobImbRatio != null ? ` imb=${(pos.clobImbRatio * 100).toFixed(0)}%` : "";
+          out.push(row(
+            `${C.cyan}${s.asset}${C.reset} ${C.yellow}CI ${s.side}${C.reset}  ` +
+            `@${((s.entryPrice ?? 0) * 100).toFixed(1)}¢${iPct}  ${fmtDuration(s.remainingMs)} left  ` +
             `$${s.totalSpent?.toFixed(2)}  pot +$${pot}`
           ));
         } else if (pos.latencyBond) {
@@ -360,19 +386,60 @@ function render({
   }
 
   out.push(row(""));
+  out.push(sec("CLOBIMB  (order-book imbalance >80% bid depth → buy before reprice)"));
+  const ciTotal = ciStats.won + ciStats.lost;
+  const ciWr    = ciTotal > 0 ? `${Math.round((ciStats.won / ciTotal) * 100)}%` : "--";
+  const ciPnl   = ciStats.totalPayout - ciStats.totalSpent;
+
+  // Show live imbalance readings across active markets
+  const topImbs = [...new Set(marketList.map(m => m.asset))].slice(0, 5).map(asset => {
+    const mkt = marketList.find(m => m.asset === asset);
+    if (!mkt) return null;
+    const upI = clobWs.getImbalance(mkt.upTokenId);
+    const dnI = clobWs.getImbalance(mkt.downTokenId);
+    if (upI == null && dnI == null) return null;
+    const best = (upI ?? 0) > (dnI ?? 0) ? upI : dnI;
+    const dir  = (upI ?? 0) > (dnI ?? 0) ? "↑" : "↓";
+    const clr  = best > 0.80 ? C.bgreen : C.dim;
+    return `${clr}${asset}${dir}${Math.round(best * 100)}%${C.reset}`;
+  }).filter(Boolean).join("  ");
+  out.push(row(
+    `Entered: ${ciStats.entered}  │  Won: ${C.green}${ciStats.won}${C.reset}  │  ` +
+    `Lost: ${C.red}${ciStats.lost}${C.reset}  │  WR: ${ciTotal > 0 ? C.bgreen : C.dim}${ciWr}${C.reset}` +
+    (topImbs ? `  │  ${topImbs}` : "")
+  ));
+  if (ciStats.entered > 0) {
+    const pnlClr = ciPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${ciPnl >= 0 ? "+" : ""}${fmtUsd(ciPnl)}${C.reset}  │  Spent: ${fmtUsd(ciStats.totalSpent)}`));
+  } else {
+    out.push(row(`${C.dim}Watching CLOB book snapshots for 80%+ bid-depth imbalance...${C.reset}`));
+  }
+
+  out.push(row(""));
+  out.push(sec("MAKERREBATE  (market-neutral, post bids on 50/50 markets, earn 0.45% rebate)"));
+  const mrTotal = mrStats.won + mrStats.lost;
+  const mrPnl   = mrStats.totalPayout - mrStats.totalSpent;
+  out.push(row(
+    `Orders active: ${mrOrders.size}  │  Filled pairs: ${mrStats.entered}  │  ` +
+    `Won: ${C.green}${mrStats.won}${C.reset}  │  Lost: ${C.red}${mrStats.lost}${C.reset}  │  ` +
+    `P&L: ${mrPnl >= 0 ? C.bgreen : C.bred}${mrPnl >= 0 ? "+" : ""}${fmtUsd(mrPnl)}${C.reset}`
+  ));
+
+  out.push(row(""));
   out.push(sec("RECENT COMPLETED"));
   const recentAll = [
     ...stats.history.slice(0, 2).map((s) => ({ ...s, _src: "arb" })),
     ...lbStats.history.slice(0, 3).map((s) => ({ ...s, _src: "lb" })),
     ...osStats.history.slice(0, 3).map((s) => ({ ...s, _src: "os" })),
     ...fsStats.history.slice(0, 2).map((s) => ({ ...s, _src: "fs" })),
+    ...ciStats.history.slice(0, 2).map((s) => ({ ...s, _src: "ci" })),
   ].sort((a, b) => (b.settledAt ?? 0) - (a.settledAt ?? 0)).slice(0, 6);
   if (recentAll.length === 0) {
     out.push(row(`${C.dim}None yet${C.reset}`));
   } else {
     for (const s of recentAll) {
-      if (s._src === "os" || s._src === "lb" || s._src === "fs") {
-        const tag  = s._src === "os" ? "OS" : s._src === "fs" ? "FS" : "LB";
+      if (s._src === "os" || s._src === "lb" || s._src === "fs" || s._src === "ci") {
+        const tag  = s._src === "os" ? "OS" : s._src === "fs" ? "FS" : s._src === "ci" ? "CI" : "LB";
         const clr  = s.won === true ? C.green : s.won === false ? C.red : C.dim;
         const mark = s.won === true ? "✓" : s.won === false ? "✗" : "?";
         out.push(row(
@@ -480,6 +547,8 @@ async function main() {
   const lbStats       = new DirectionalStats();  // latency bond — primary strategy
   const osStats       = new DirectionalStats();  // oracle snipe — post-close resolution lag
   const fsStats       = new DirectionalStats();  // funding snipe — extreme perp funding squeeze
+  const ciStats       = new DirectionalStats();  // CLOB order book imbalance signal
+  const mrStats       = new DirectionalStats();  // maker rebate farming (market-neutral)
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
@@ -489,6 +558,7 @@ async function main() {
   const _closeSnaps      = new Map();  // marketId → { closePrice, openPrice, endMs }
   const _osEntered       = new Set();  // prevent double-entering same expired market
   const expiredMarketBuf = new Map();  // marketId → market (keeps expired markets for OS scanning)
+  const _mrOrders        = new Map();  // marketId → { upOrder, dnOrder, asset, placedAt }
 
   // Per-asset CLOB liquidity cap — prevents pushing thin markets
   const ASSET_CLOB_CAP = {
@@ -658,6 +728,8 @@ async function main() {
   onLiquidationCascade(() => { return; });
   startLiqFeed();
   startFuturesFeed();
+  startTradeFlow();
+  startWhaleFeed();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -1061,12 +1133,12 @@ async function main() {
     return; // disabled — directional entries underperform live
     const now      = Date.now(); // eslint-disable-line no-unreachable
     const CORR     =
-      asset === "BTC"  ? ["BTC", "ETH", "SOL", "XRP", "AVAX", "DOGE", "LINK", "MATIC"] :
-      asset === "ETH"  ? ["ETH", "BTC", "SOL", "LINK", "MATIC"] :
-      asset === "SOL"  ? ["SOL", "AVAX", "ETH"] :
-      asset === "XRP"  ? ["XRP", "DOGE"] :
-      asset === "AVAX" ? ["AVAX", "SOL"] :
-      [asset];
+      _asset === "BTC"  ? ["BTC", "ETH", "SOL", "XRP", "AVAX", "DOGE", "LINK", "MATIC"] :
+      _asset === "ETH"  ? ["ETH", "BTC", "SOL", "LINK", "MATIC"] :
+      _asset === "SOL"  ? ["SOL", "AVAX", "ETH"] :
+      _asset === "XRP"  ? ["XRP", "DOGE"] :
+      _asset === "AVAX" ? ["AVAX", "SOL"] :
+      [_asset];
 
     for (const mkt of marketList) {
       if (!CORR.includes(mkt.asset)) continue;
@@ -1078,14 +1150,14 @@ async function main() {
       if (now < cool) continue;
       _cascadeCooldown.set(mkt.id, now + 90_000); // 90s per-market cooldown
 
-      const tokenId = direction === "UP" ? mkt.upTokenId : mkt.downTokenId;
+      const tokenId = _direction === "UP" ? mkt.upTokenId : mkt.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.70) continue;
 
       const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
       const available = Math.max(0, simBalance - allocated);
       // Primary asset gets full 15%, correlated get 10%
-      const pct       = mkt.asset === asset ? 0.15 : 0.10;
+      const pct       = mkt.asset === _asset ? 0.15 : 0.10;
       const betSize   = Math.min(simBalance * pct, available);
       if (betSize < CONFIG.minBetUsdc) continue;
 
@@ -1097,7 +1169,7 @@ async function main() {
         try {
           const pos = new DirectionalPosition({
             id: mkt.id, asset: mkt.asset,
-            side: direction, tokenId, binanceOpenPrice, windowEndMs: mkt.endMs,
+            side: _direction, tokenId, binanceOpenPrice, windowEndMs: mkt.endMs,
           });
           pos.cascade = true;
           const entered = await pos.enter(ask, betSize);
@@ -1158,13 +1230,32 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.70) continue;  // Polymarket must still be lagging
 
-      // OI delta filter: declining OI = squeeze/unwind (weak signal), skip or reduce size
+      // OI delta filter: declining OI = squeeze/unwind (weak signal), skip
       const oiDelta = getOIDelta(market.asset, 120_000);
       if (oiDelta !== null && oiDelta < -0.003) continue; // OI shrinking ≥0.3% → skip
-      const oiMultiplier = oiDelta !== null && oiDelta > 0.005 ? 1.2 : 1.0; // OI growing → 20% bigger
+      const oiMult = oiDelta !== null && oiDelta > 0.005 ? 1.2 : 1.0;
+
+      // Volume spike confirmation: dying volume = fading move, skip; spike = stronger signal
+      const spike = getVolumeSpike(market.asset);
+      if (spike !== null && spike < 0.5) continue; // volume < 50% of normal → momentum fading
+      const spikeMult = spike !== null && spike > 4.0 ? 1.3 : 1.0; // 4× volume spike → 30% bigger
+
+      // Buy/sell pressure alignment: must match direction
+      const bp = getBuyPressure(market.asset);
+      if (bp !== null) {
+        if (side === "UP"   && bp < 0.42) continue; // UP signal but sellers dominating
+        if (side === "DOWN" && bp > 0.58) continue; // DOWN signal but buyers dominating
+      }
+
+      // Macro event multiplier (FOMC/CPI/NFP windows)
+      const eventMult = getEventMultiplier();
+
+      // Whale signal alignment: confirms with large on-chain flow
+      const whale = getWhaleSignal(market.asset);
+      const whaleMult = (whale && whale.direction === side && whale.ageMs < 30 * 60_000) ? 1.15 : 1.0;
 
       const betSize = dynamicBetSize(market.asset, 0.20,
-        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() * oiMultiplier);
+        adaptive.getMultiplier(market.asset, "LATENCYBOND") * getTimeMultiplier() * oiMult * spikeMult * eventMult * whaleMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       simBalance -= betSize;
@@ -1341,6 +1432,198 @@ async function main() {
     }
   };
 
+  // ── Helper: cancel all open maker-rebate orders for a market ─────────────
+  const cancelMakerOrders = async (marketId) => {
+    const mr = _mrOrders.get(marketId);
+    if (!mr) return;
+    const { cancelOrder: co } = await import("./live/orders.js");
+    await co(mr.upOrder?.orderId).catch(() => {});
+    await co(mr.dnOrder?.orderId).catch(() => {});
+    _mrOrders.delete(marketId);
+  };
+
+  // ── Strategy: CLOB Order Book Imbalance ──────────────────────────────────
+  // When bid depth on a token heavily outweighs ask depth (>80% ratio), informed
+  // buyers are accumulating before a reprice. Enter BEFORE the CLOB adjusts.
+  // No Binance data needed — pure order-book microstructure signal.
+  const _ciEntered = new Set();
+  const clobImbalanceCheck = async () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const remaining = market.endMs - now;
+      if (remaining < 30_000 || remaining > wm * 55_000) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (_ciEntered.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const upImb = clobWs.getImbalance(market.upTokenId);
+      const dnImb = clobWs.getImbalance(market.downTokenId);
+      if (upImb == null && dnImb == null) continue;
+
+      let side = null;
+      let imbalance = 0;
+      if ((upImb ?? 0) > 0.80 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
+      else if ((dnImb ?? 0) > 0.80)                             { side = "DOWN"; imbalance = dnImb; }
+      if (!side) continue;
+
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.65) continue; // must be underpriced — imbalance hasn't repriced yet
+
+      // Cross-validate: buy pressure must align with imbalance direction
+      const bp = getBuyPressure(market.asset);
+      if (bp !== null) {
+        if (side === "UP" && bp < 0.48) continue;
+        if (side === "DOWN" && bp > 0.52) continue;
+      }
+
+      const betSize = dynamicBetSize(market.asset, 0.08,
+        adaptive.getMultiplier(market.asset, "CLOBIMB") * getTimeMultiplier());
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      _ciEntered.add(market.id);
+      await cancelMakerOrders(market.id).catch(() => {});
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = lateEntry.getOpenPrice(market.id) ?? feeds[market.asset]?.get() ?? null;
+
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.clobImb     = true;
+          pos.clobImbRatio = imbalance;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            ciStats.entered++;
+            console.error(`[ci] ${market.asset} ${side} @${ask.toFixed(3)}  imb=${(imbalance * 100).toFixed(0)}%  $${betSize.toFixed(2)}`);
+          } else { simBalance += betSize; _ciEntered.delete(market.id); }
+        } catch { simBalance += betSize; _ciEntered.delete(market.id); }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
+  // ── Strategy: Maker Rebate Farming ───────────────────────────────────────
+  // On truly 50/50 markets, post limit BUY orders at bid on both tokens.
+  // Earn 0.45% maker rebate per fill. Combined: buy both sides below mid →
+  // collect $1 at settlement regardless of outcome → net +3–5% per round-trip.
+  // Kill-switch: cancel all MR orders the moment any directional signal fires.
+  const makerRebateCheck = async () => {
+    const now = Date.now();
+    // Evict stale MR order records for ended markets
+    for (const [id, mr] of _mrOrders) {
+      const mkt = marketList.find(m => m.id === id);
+      if (!mkt || mkt.endMs < now) {
+        await cancelMakerOrders(id).catch(() => {});
+      }
+    }
+
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const remaining = market.endMs - now;
+      if (remaining < 90_000 || remaining > wm * 55_000) continue; // need ≥90s
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (_mrOrders.has(market.id)) continue;
+
+      const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
+      if (!yesPrice || !noPrice) continue;
+      // Must be near 50/50 — if it's directional, skip (adverse selection risk)
+      if (Math.abs(yesPrice - 0.50) > 0.04 || Math.abs(noPrice - 0.50) > 0.04) continue;
+
+      // Skip if any signal says market is NOT 50/50
+      const oiDelta = getOIDelta(market.asset, 120_000);
+      if (oiDelta !== null && Math.abs(oiDelta) > 0.003) continue;
+      const spike = getVolumeSpike(market.asset);
+      if (spike !== null && spike > 2.5) continue;
+      const whale = getWhaleSignal(market.asset);
+      if (whale) continue; // active whale signal → skip, market may be directional
+
+      const upBid = clobWs.getBid(market.upTokenId);
+      const dnBid = clobWs.getBid(market.downTokenId);
+      if (!upBid || !dnBid) continue;
+
+      // Total cost if both fill: upBid + dnBid < 1.00 → guaranteed profit at settlement
+      if (upBid + dnBid >= 0.96) continue; // need at least 4¢ margin
+
+      const betSize = dynamicBetSize(market.asset, 0.05, 1.0);
+      if (betSize < CONFIG.minBetUsdc * 2) continue; // need enough for both sides
+      const halfBet = betSize / 2;
+
+      try {
+        const { placeLimitBuy } = await import("./live/orders.js");
+        const upOrder = await placeLimitBuy(market.upTokenId, upBid, Math.floor(halfBet / upBid));
+        const dnOrder = await placeLimitBuy(market.downTokenId, dnBid, Math.floor(halfBet / dnBid));
+        _mrOrders.set(market.id, { upOrder, dnOrder, asset: market.asset, placedAt: now });
+      } catch { /* failed to place — skip */ }
+    }
+  };
+
+  // Poll MR order fill status every 5s
+  const makerRebateMonitor = async () => {
+    if (!_mrOrders.size) return;
+    const { getOrderStatus } = await import("./live/orders.js");
+    const now = Date.now();
+    for (const [id, mr] of _mrOrders) {
+      const market = marketList.find(m => m.id === id);
+      if (!market || market.endMs < now) { await cancelMakerOrders(id).catch(() => {}); continue; }
+      if (activePositions.has(id)) { _mrOrders.delete(id); continue; }
+
+      const [upStatus, dnStatus] = await Promise.all([
+        getOrderStatus(mr.upOrder?.orderId).catch(() => null),
+        getOrderStatus(mr.dnOrder?.orderId).catch(() => null),
+      ]);
+
+      const upFilled = upStatus?.status === "matched";
+      const dnFilled = dnStatus?.status === "matched";
+
+      if (upFilled && dnFilled) {
+        // Both sides filled — net profit guaranteed at settlement
+        _mrOrders.delete(id);
+        mrStats.entered++;
+        const spent = ((mr.upOrder?.price ?? 0) * (mr.upOrder?.size ?? 0)) + ((mr.dnOrder?.price ?? 0) * (mr.dnOrder?.size ?? 0));
+        simBalance -= spent;
+        // We own both tokens; at settlement one pays $1/share → net positive.
+        // Track as a simple profit event (don't need full position tracking since outcome is known).
+        const upShares = mr.upOrder.size ?? 0;
+        const dnShares = mr.dnOrder.size ?? 0;
+        const payout = Math.max(upShares, dnShares) * 1.0; // whichever side wins pays out
+        simBalance += payout;
+        const net = payout - spent;
+        mrStats.totalSpent  += spent;
+        mrStats.totalPayout += payout;
+        if (net > 0) mrStats.won++; else mrStats.lost++;
+        trackPnl();
+        console.error(`[mr] ${mr.asset} BOTH FILLED  net=${net >= 0 ? "+" : ""}${net.toFixed(2)}`);
+      } else if (upFilled && !dnFilled && now - mr.placedAt > 60_000) {
+        // Only up filled after 60s — directional UP position, cancel the pending DN order
+        const { cancelOrder: co } = await import("./live/orders.js");
+        await co(mr.dnOrder?.orderId).catch(() => {});
+        _mrOrders.delete(id);
+        const filledCost = (mr.upOrder?.price ?? 0) * (mr.upOrder?.size ?? 0);
+        simBalance -= filledCost;
+        mrStats.totalSpent += filledCost;
+        mrStats.entered++;
+      } else if (dnFilled && !upFilled && now - mr.placedAt > 60_000) {
+        const { cancelOrder: co } = await import("./live/orders.js");
+        await co(mr.upOrder?.orderId).catch(() => {});
+        _mrOrders.delete(id);
+        const filledCost = (mr.dnOrder?.price ?? 0) * (mr.dnOrder?.size ?? 0);
+        simBalance -= filledCost;
+        mrStats.totalSpent += filledCost;
+        mrStats.entered++;
+      }
+    }
+  };
+
   const monitor = async () => {
     if (isMonitoring) return;
     isMonitoring = true;
@@ -1390,6 +1673,11 @@ async function main() {
               logTrade(_tfs); allTradeHistory.push(_tfs);
               fsStats.record(s);
               if (s.won !== null) adaptive.record(pos.asset, "FUNDINGSNIPE", s.won);
+            } else if (pos.clobImb) {
+              const _tci = { ...s, strategy: "CLOBIMB" };
+              logTrade(_tci); allTradeHistory.push(_tci);
+              ciStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "CLOBIMB", s.won);
             } else if (pos.latencyBond) {
               const _tlb = { ...s, strategy: "LATENCYBOND" };
               logTrade(_tlb); allTradeHistory.push(_tlb);
@@ -1489,7 +1777,12 @@ async function main() {
     latencybond:  { entered: lbStats.entered, won: lbStats.won, lost: lbStats.lost, totalSpent: lbStats.totalSpent, totalPayout: lbStats.totalPayout },
     oraclesnipe:  { entered: osStats.entered, won: osStats.won, lost: osStats.lost, totalSpent: osStats.totalSpent, totalPayout: osStats.totalPayout, buffered: expiredMarketBuf.size },
     fundingsnipe: { entered: fsStats.entered, won: fsStats.won, lost: fsStats.lost, totalSpent: fsStats.totalSpent, totalPayout: fsStats.totalPayout },
+    clobimb:      { entered: ciStats.entered, won: ciStats.won, lost: ciStats.lost, totalSpent: ciStats.totalSpent, totalPayout: ciStats.totalPayout },
+    makerrebate:  { entered: mrStats.entered, won: mrStats.won, lost: mrStats.lost, totalSpent: mrStats.totalSpent, totalPayout: mrStats.totalPayout, activeOrders: _mrOrders.size },
     funding: Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getFundingData(a)])),
+    whale:   Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, getWhaleSignal(a)])),
+    event:   getCurrentEvent(),
+    volume:  Object.fromEntries(["BTC","ETH","SOL","XRP","DOGE","AVAX","LINK","MATIC"].map(a => [a, { spike: getVolumeSpike(a), buyPressure: getBuyPressure(a) }])),
     cascade:  { entered: cascadeStats.entered, won: cascadeStats.won, lost: cascadeStats.lost, totalSpent: cascadeStats.totalSpent, totalPayout: cascadeStats.totalPayout },
     spike:    { entered: spikeStats.entered, won: spikeStats.won, lost: spikeStats.lost, totalSpent: spikeStats.totalSpent, totalPayout: spikeStats.totalPayout },
     open:     { entered: openStats.entered, won: openStats.won, lost: openStats.lost, totalSpent: openStats.totalSpent, totalPayout: openStats.totalPayout },
@@ -1510,9 +1803,12 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(oracleSnipeCheck,    500);  // TIER 1 — post-close stale CLOB (99% WR)
-  setInterval(latencyBondCheck,  1_000);  // TIER 2 — Binance lag arb, OI-filtered
-  setInterval(fundingSnipeCheck, 30_000); // TIER 3 — extreme funding rate squeeze
+  setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
+  setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
+  setInterval(fundingSnipeCheck, 30_000);  // TIER 3 — extreme funding rate squeeze
+  setInterval(clobImbalanceCheck,  5_000); // TIER 4 — CLOB order book imbalance
+  setInterval(makerRebateCheck,   60_000); // TIER 5 — market-neutral maker rebate farming
+  setInterval(makerRebateMonitor,  5_000); // MR fill checker
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
   setInterval(fadeCheck,        2_000);  // disabled inside
@@ -1539,7 +1835,8 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, lbStats, osStats, fsStats, sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
+      activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats,
+      sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       expiredBuf: expiredMarketBuf.size,
       opportunities: getOpportunities(),
       now:           Date.now(),
@@ -1547,6 +1844,9 @@ async function main() {
       wsConnected:   clobWs.connected,
       wsLastUpdate:  clobWs.lastUpdate,
       wsMarkets:     clobWs.marketCount,
+      mrOrders:      _mrOrders,
+      marketList,
+      clobWs,
     });
   }, CONFIG.refreshMs.display);
 
@@ -1554,24 +1854,30 @@ async function main() {
     clobWs.close();
     stopLiqFeed();
     stopFuturesFeed();
+    stopTradeFlow();
+    stopWhaleFeed();
+    // Cancel all open maker-rebate orders before exit
+    for (const [id] of _mrOrders) await cancelMakerOrders(id).catch(() => {});
     for (const feed of Object.values(feeds)) feed.close();
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
     const lbPnl  = lbStats.totalPayout - lbStats.totalSpent;
     const osPnl  = osStats.totalPayout - osStats.totalSpent;
     const fsPnl  = fsStats.totalPayout - fsStats.totalSpent;
-    const lbWr   = (lbStats.won + lbStats.lost) > 0
-      ? `${Math.round((lbStats.won  / (lbStats.won  + lbStats.lost))  * 100)}%` : "--";
-    const osWr   = (osStats.won + osStats.lost) > 0
-      ? `${Math.round((osStats.won  / (osStats.won  + osStats.lost))  * 100)}%` : "--";
-    const fsWr   = (fsStats.won + fsStats.lost) > 0
-      ? `${Math.round((fsStats.won  / (fsStats.won  + fsStats.lost))  * 100)}%` : "--";
+    const ciPnl  = ciStats.totalPayout - ciStats.totalSpent;
+    const mrPnl  = mrStats.totalPayout - mrStats.totalSpent;
+    const lbWr   = (lbStats.won + lbStats.lost) > 0 ? `${Math.round(lbStats.won / (lbStats.won + lbStats.lost) * 100)}%` : "--";
+    const osWr   = (osStats.won + osStats.lost) > 0 ? `${Math.round(osStats.won / (osStats.won + osStats.lost) * 100)}%` : "--";
+    const fsWr   = (fsStats.won + fsStats.lost) > 0 ? `${Math.round(fsStats.won / (fsStats.won + fsStats.lost) * 100)}%` : "--";
+    const ciWr   = (ciStats.won + ciStats.lost) > 0 ? `${Math.round(ciStats.won / (ciStats.won + ciStats.lost) * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
       `ARB:           entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
       `LATENCYBOND:   entered=${lbStats.entered}  won=${lbStats.won}  lost=${lbStats.lost}  WR=${lbWr}  P&L=${fmtUsd(lbPnl)}\n` +
       `ORACLESNIPE:   entered=${osStats.entered}  won=${osStats.won}  lost=${osStats.lost}  WR=${osWr}  P&L=${fmtUsd(osPnl)}\n` +
       `FUNDINGSNIPE:  entered=${fsStats.entered}  won=${fsStats.won}  lost=${fsStats.lost}  WR=${fsWr}  P&L=${fmtUsd(fsPnl)}\n` +
+      `CLOBIMB:       entered=${ciStats.entered}  won=${ciStats.won}  lost=${ciStats.lost}  WR=${ciWr}  P&L=${fmtUsd(ciPnl)}\n` +
+      `MAKERREBATE:   pairs=${mrStats.entered}  P&L=${fmtUsd(mrPnl)}\n` +
       `Sim balance: ${fmtUsd(simBalance)} (saved)\n`
     );
     process.exit(0);

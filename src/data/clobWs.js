@@ -6,6 +6,7 @@ export class ClobWsFeed {
   constructor() {
     this._threshold   = 0.95;
     this._prices      = new Map(); // tokenId → { bid, ask, mid, updatedAt }
+    this._volumes     = new Map(); // tokenId → { bidVol, askVol, updatedAt } (USD depth)
     this._markets     = new Map(); // marketId → market object
     this._tokenToMkt  = new Map(); // tokenId → marketId
     this._askHistory  = new Map(); // tokenId → [{ price, ts }]
@@ -50,6 +51,8 @@ export class ClobWsFeed {
     this._tokenToMkt.delete(m.downTokenId);
     this._prices.delete(m.upTokenId);
     this._prices.delete(m.downTokenId);
+    this._volumes.delete(m.upTokenId);
+    this._volumes.delete(m.downTokenId);
     this._askHistory.delete(m.upTokenId);
     this._askHistory.delete(m.downTokenId);
   }
@@ -64,6 +67,18 @@ export class ClobWsFeed {
   getMid(tokenId)   { return this._prices.get(tokenId)?.mid ?? null; }
   getAsk(tokenId)   { return this._prices.get(tokenId)?.ask ?? null; }
   getBid(tokenId)   { return this._prices.get(tokenId)?.bid ?? null; }
+
+  // Order book imbalance: ratio of bid USD depth to total depth (0–1).
+  // >0.80 = buyers dominating, token price likely moving up soon.
+  // Returns null if no book data or data is stale (>30s).
+  getImbalance(tokenId) {
+    const v = this._volumes.get(tokenId);
+    if (!v || Date.now() - v.updatedAt > 30_000) return null;
+    const total = v.bidVol + v.askVol;
+    if (total === 0) return null;
+    return v.bidVol / total;
+  }
+
   getAgeMs(tokenId) {
     const p = this._prices.get(tokenId);
     return p ? Date.now() - p.updatedAt : null;
@@ -132,6 +147,12 @@ export class ClobWsFeed {
       const newAsk = asks.length ? Math.min(...asks.map(o => Number(o.price)).filter(Number.isFinite)) : null;
       if (newBid != null) bid = newBid;
       if (newAsk != null) ask = newAsk;
+      // Track full-book USD depth for order-imbalance signal
+      const bidVol = bids.reduce((s, o) => s + Number(o.price) * Number(o.size), 0);
+      const askVol = asks.reduce((s, o) => s + Number(o.price) * Number(o.size), 0);
+      if (bidVol > 0 || askVol > 0) {
+        this._volumes.set(tokenId, { bidVol, askVol, updatedAt: Date.now() });
+      }
     } else if (msg.event_type === "price_change") {
       // Incremental changes: [{price, size, side: "BUY"|"SELL"}]
       const changes = Array.isArray(msg.changes) ? msg.changes : [];
