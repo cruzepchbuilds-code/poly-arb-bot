@@ -1385,13 +1385,23 @@ async function main() {
       const spike = getVolumeSpike(market.asset);
       if (spike !== null && spike < 0.3) continue;
 
+      // Buy pressure alignment — skip if flow strongly contradicts direction
+      const bpOps = getBuyPressure(market.asset);
+      if (bpOps !== null) {
+        if (side === "UP"   && bpOps < 0.35) continue;
+        if (side === "DOWN" && bpOps > 0.65) continue;
+      }
+      const bpOpsMult = bpOps !== null
+        ? ((side === "UP" && bpOps > 0.60) || (side === "DOWN" && bpOps < 0.40)) ? 1.12 : 1.0
+        : 1.0;
+
       // Consecutive carry multiplier: previous market on same asset settled same direction
       const carry = _recentSettlements.get(market.asset);
       const isCarry = carry?.side === side && (now - carry.settledAt) < 45_000;
       const carryMult = isCarry ? 1.35 : 1.0;
 
       const betSize = dynamicBetSize(market.asset, 0.22,
-        adaptive.getMultiplier(market.asset, "OPENSNIPE") * getTimeMultiplier() * carryMult);
+        adaptive.getMultiplier(market.asset, "OPENSNIPE") * getTimeMultiplier() * carryMult * bpOpsMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _opsEntered.add(market.id);
@@ -1546,8 +1556,18 @@ async function main() {
       if (fsGamma && fsGamma.direction !== side && fsGamma.strength > 0.3) continue;
       const fsGammaMult = (fsGamma?.direction === side) ? 1 + fsGamma.strength * 0.20 : 1.0;
 
+      // Buy pressure alignment: squeeze already in motion = boost, strongly opposite = skip
+      const fsBp = getBuyPressure(market.asset);
+      if (fsBp !== null) {
+        if (side === "DOWN" && fsBp > 0.70) continue; // buyers too strong, DOWN squeeze not starting
+        if (side === "UP"   && fsBp < 0.30) continue; // sellers too strong, UP squeeze not starting
+      }
+      const fsBpMult = fsBp !== null
+        ? ((side === "DOWN" && fsBp < 0.40) || (side === "UP" && fsBp > 0.60)) ? 1.10 : 1.0
+        : 1.0;
+
       const betSize = dynamicBetSize(market.asset, 0.10,
-        adaptive.getMultiplier(market.asset, "FUNDINGSNIPE") * getTimeMultiplier() * fsGammaMult);
+        adaptive.getMultiplier(market.asset, "FUNDINGSNIPE") * getTimeMultiplier() * fsGammaMult * fsBpMult);
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _fsFired.add(market.id);
@@ -1986,9 +2006,9 @@ async function main() {
   setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
   setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
   setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
-  setInterval(fundingSnipeCheck, 30_000);  // TIER 3 — extreme funding rate squeeze
+  setInterval(fundingSnipeCheck, 15_000);  // TIER 3 — extreme funding rate squeeze
   setInterval(clobImbalanceCheck,  1_000); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
-  setInterval(makerRebateCheck,   60_000); // TIER 5 — market-neutral maker rebate farming
+  setInterval(makerRebateCheck,   30_000); // TIER 5 — market-neutral maker rebate farming
   setInterval(makerRebateMonitor,  5_000); // MR fill checker
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
   // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
