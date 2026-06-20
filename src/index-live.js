@@ -15,6 +15,7 @@ import { LateEntrySignal } from "./strategies/lateEntry.js";
 import { ContrarianSniper } from "./strategies/contrarian.js";
 import { FadeMomentum } from "./strategies/fadeMomentum.js";
 import { LIVE, getUsdcBalance } from "./live/orders.js";
+import { startLiqFeed, stopLiqFeed, onLiquidationCascade } from "./live/liqFeed.js";
 import { fmtUsd, fmtTime, fmtDuration, pad } from "./utils.js";
 import { startWebServer } from "./web/server.js";
 import { analyzeTrades } from "./analytics/analyzer.js";
@@ -144,6 +145,22 @@ class SniperStats {
 }
 
 class FadeStats {
+  constructor() {
+    this.entered = 0; this.won = 0; this.lost = 0;
+    this.totalSpent = 0; this.totalPayout = 0;
+    this.history = [];
+  }
+  record(s) {
+    if (s.won === true) this.won++;
+    else if (s.won === false) this.lost++;
+    this.totalSpent  += s.totalSpent ?? 0;
+    this.totalPayout += s.payout ?? 0;
+    this.history.unshift(s);
+    if (this.history.length > 10) this.history.pop();
+  }
+}
+
+class DirectionalStats {
   constructor() {
     this.entered = 0; this.won = 0; this.lost = 0;
     this.totalSpent = 0; this.totalPayout = 0;
@@ -406,6 +423,20 @@ async function main() {
   setInterval(snapPrices, CONFIG.refreshMs.priceSnap);
   snapPrices();
 
+  // Fast 5-second snapshots for spike detection (keep last 24 = 2 minutes)
+  const fastSnaps = Object.fromEntries(CONFIG.assets.map((a) => [a, []]));
+  const snapFast = () => {
+    for (const [asset, feed] of Object.entries(feeds)) {
+      const p = feed.get();
+      if (p) {
+        fastSnaps[asset].push({ price: p, ts: Date.now() });
+        if (fastSnaps[asset].length > 24) fastSnaps[asset].shift();
+      }
+    }
+  };
+  setInterval(snapFast, 5_000);
+  snapFast();
+
   const getMomentum = (asset) => {
     const snaps = priceSnaps[asset];
     if (!snaps || snaps.length < 2) return null;
@@ -419,11 +450,17 @@ async function main() {
   const stats             = new Stats();
   const lemStats          = new LemStats();
   const sweepStats        = new SweepStats();
-  const sniperStats = new SniperStats();
-  const fadeStats   = new FadeStats();
-  const fade        = new FadeMomentum();
-  const adaptive    = new AdaptiveSizer();
-  let _analytics    = null;
+  const sniperStats   = new SniperStats();
+  const fadeStats     = new FadeStats();
+  const cascadeStats  = new DirectionalStats();  // liquidation cascade
+  const spikeStats    = new DirectionalStats();  // macro price spike
+  const openStats     = new DirectionalStats();  // market open front-run
+  const fade          = new FadeMomentum();
+  const adaptive      = new AdaptiveSizer();
+  let _analytics      = null;
+  const marketOpenFired  = new Set();           // markets already entered at open
+  let _lastSpikeFire     = 0;                   // cooldown: only one spike trade per 5 min
+  const _cascadeCooldown = new Map();           // asset → cooldown expiry ms
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
   let _seedWins = 0, _seedLosses = 0;
@@ -571,6 +608,13 @@ async function main() {
   });
 
   clobWs.connect();
+
+  // Wire liquidation cascade signal → multi-asset entry
+  onLiquidationCascade(({ asset, direction, totalUsd }) => {
+    console.error(`[cascade] ${asset} ${direction} $${(totalUsd / 1000).toFixed(0)}k liquidated`);
+    tryCascadeEntry(asset, direction);
+  });
+  startLiqFeed();
 
   const refreshMarkets = async () => {
     let markets = [];
@@ -848,6 +892,179 @@ async function main() {
     }
   };
 
+  // ── Strategy: Market Open Front-Run ──────────────────────────────────────
+  // When a fresh 5-min market opens (<45s old) and Binance shows strong momentum,
+  // buy the trending side immediately while LPs are still calibrating (wide spread).
+  const marketOpenCheck = () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const marketOpenMs = market.endMs - wm * 60_000;
+      const ageMs = now - marketOpenMs;
+      if (ageMs < 0 || ageMs > 45_000) continue;          // only first 45s
+      if (marketOpenFired.has(market.id)) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      // Need at least 2 fast snaps to compute 90s momentum
+      const snaps = fastSnaps[market.asset];
+      if (!snaps || snaps.length < 3) continue;
+      const old = snaps[Math.max(0, snaps.length - 18)]; // ~90s ago (18 × 5s)
+      const cur = snaps[snaps.length - 1];
+      if (cur.ts - old.ts < 30_000) continue;             // need at least 30s of data
+      const pctMove = (cur.price - old.price) / old.price;
+      if (Math.abs(pctMove) < 0.003) continue;            // need ≥0.3% move
+
+      const side    = pctMove > 0 ? "UP" : "DOWN";
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.58) continue;            // skip if already repriced
+
+      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const available = Math.max(0, simBalance - allocated);
+      const betSize   = Math.min(simBalance * 0.10, available);
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      marketOpenFired.add(market.id);
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = cur.price;
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.open = true;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            openStats.entered++;
+          } else { simBalance += betSize; marketOpenFired.delete(market.id); }
+        } catch { simBalance += betSize; marketOpenFired.delete(market.id); }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
+  // ── Strategy: Macro Price Spike ───────────────────────────────────────────
+  // When Binance moves ≥1.8% in ≤20 seconds (macro event), enter ALL assets
+  // simultaneously. LPs cannot cancel fast enough; you capture their stale quotes.
+  const macroSpikeCheck = () => {
+    if (Date.now() - _lastSpikeFire < 5 * 60_000) return; // 5-min cooldown
+
+    let spikeAsset = null; let spikePct = 0; let spikeSide = null;
+    for (const asset of CONFIG.assets) {
+      const snaps = fastSnaps[asset];
+      if (!snaps || snaps.length < 4) continue;
+      const recent = snaps.slice(-4); // last 20s (4 × 5s)
+      const pct = (recent[recent.length - 1].price - recent[0].price) / recent[0].price;
+      if (Math.abs(pct) > Math.abs(spikePct)) { spikePct = pct; spikeAsset = asset; }
+    }
+    if (!spikeAsset || Math.abs(spikePct) < 0.018) return; // ≥1.8% in 20s
+
+    spikeSide = spikePct > 0 ? "UP" : "DOWN";
+    _lastSpikeFire = Date.now();
+    console.error(`[spike] ${spikeAsset} ${(spikePct * 100).toFixed(2)}% in 20s → entering all assets ${spikeSide}`);
+
+    const now = Date.now();
+    for (const market of marketList) {
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+      if (market.endMs - now < 60_000) continue;          // need ≥60s to fill
+
+      const tokenId = spikeSide === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.75) continue;
+
+      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const available = Math.max(0, simBalance - allocated);
+      const betSize   = Math.min(simBalance * 0.12, available);
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = feeds[market.asset]?.get() ?? null;
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side: spikeSide, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.spike = true;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            spikeStats.entered++;
+          } else { simBalance += betSize; }
+        } catch { simBalance += betSize; }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
+  // ── Strategy: Liquidation Cascade Stack ──────────────────────────────────
+  // When $300k+ in forced liquidations hit one direction in 30s, enter that asset
+  // plus all correlated assets (they lag by 30-150s).
+  const tryCascadeEntry = (asset, direction) => {
+    const now      = Date.now();
+    const CORR     =
+      asset === "BTC"  ? ["BTC", "ETH", "SOL", "XRP", "AVAX", "DOGE", "LINK", "MATIC"] :
+      asset === "ETH"  ? ["ETH", "BTC", "SOL", "LINK", "MATIC"] :
+      asset === "SOL"  ? ["SOL", "AVAX", "ETH"] :
+      asset === "XRP"  ? ["XRP", "DOGE"] :
+      asset === "AVAX" ? ["AVAX", "SOL"] :
+      [asset];
+
+    for (const mkt of marketList) {
+      if (!CORR.includes(mkt.asset)) continue;
+      if (activePositions.has(mkt.id) || enteringMarkets.has(mkt.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+      if (mkt.endMs - now < 60_000) continue;
+
+      const cool = _cascadeCooldown.get(mkt.id) ?? 0;
+      if (now < cool) continue;
+      _cascadeCooldown.set(mkt.id, now + 90_000); // 90s per-market cooldown
+
+      const tokenId = direction === "UP" ? mkt.upTokenId : mkt.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask > 0.70) continue;
+
+      const allocated = [...activePositions.values()].reduce((s, p) => s + (p.totalSpent ?? 0), 0);
+      const available = Math.max(0, simBalance - allocated);
+      // Primary asset gets full 15%, correlated get 10%
+      const pct       = mkt.asset === asset ? 0.15 : 0.10;
+      const betSize   = Math.min(simBalance * pct, available);
+      if (betSize < CONFIG.minBetUsdc) continue;
+
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(mkt.id);
+      const binanceOpenPrice = feeds[mkt.asset]?.get() ?? null;
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: mkt.id, asset: mkt.asset,
+            side: direction, tokenId, binanceOpenPrice, windowEndMs: mkt.endMs,
+          });
+          pos.cascade = true;
+          const entered = await pos.enter(ask, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(mkt.id, pos);
+            cascadeStats.entered++;
+          } else { simBalance += betSize; _cascadeCooldown.delete(mkt.id); }
+        } catch { simBalance += betSize; _cascadeCooldown.delete(mkt.id); }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(mkt.id); }
+      })();
+    }
+  };
+
   const monitor = async () => {
     if (isMonitoring) return;
     isMonitoring = true;
@@ -896,6 +1113,22 @@ async function main() {
               fade.recordResult(s.won);
               if (s.won !== null) adaptive.record(pos.asset, "FADE", s.won);
               fade.clearMarket(id);
+            } else if (pos.cascade) {
+              const _tc = { ...s, strategy: "CASCADE" };
+              logTrade(_tc); allTradeHistory.push(_tc);
+              cascadeStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "CASCADE", s.won);
+            } else if (pos.spike) {
+              const _tk = { ...s, strategy: "SPIKE" };
+              logTrade(_tk); allTradeHistory.push(_tk);
+              spikeStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "SPIKE", s.won);
+            } else if (pos.open) {
+              const _to = { ...s, strategy: "OPEN" };
+              logTrade(_to); allTradeHistory.push(_to);
+              openStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "OPEN", s.won);
+              marketOpenFired.delete(id);
             } else {
               const _tl = { ...s, strategy: "LEM" };
               logTrade(_tl); allTradeHistory.push(_tl);
@@ -955,9 +1188,12 @@ async function main() {
     activePositions: [...activePositions.values()].map(p => p.summary),
     arb:    { entered: stats.entered, bothFilled: stats.bothFilled, oneSide: stats.oneFilled, noFills: stats.noFills, guaranteedProfit: stats.guaranteedProfit, totalSpent: stats.totalSpent },
     lem:    { entered: lemStats.entered, won: lemStats.won, lost: lemStats.lost, totalSpent: lemStats.totalSpent, totalPayout: lemStats.totalPayout },
-    sniper: { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
-    fade:   { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
-    sweep:  { followed: sweepStats.followed },
+    sniper:   { entered: sniperStats.entered, won: sniperStats.won, lost: sniperStats.lost, totalSpent: sniperStats.totalSpent, totalPayout: sniperStats.totalPayout, winRate: sniper.winRate, tradeCount: sniper.tradeCount },
+    fade:     { entered: fadeStats.entered, won: fadeStats.won, lost: fadeStats.lost, totalSpent: fadeStats.totalSpent, totalPayout: fadeStats.totalPayout, winRate: fade.winRate },
+    cascade:  { entered: cascadeStats.entered, won: cascadeStats.won, lost: cascadeStats.lost, totalSpent: cascadeStats.totalSpent, totalPayout: cascadeStats.totalPayout },
+    spike:    { entered: spikeStats.entered, won: spikeStats.won, lost: spikeStats.lost, totalSpent: spikeStats.totalSpent, totalPayout: spikeStats.totalPayout },
+    open:     { entered: openStats.entered, won: openStats.won, lost: openStats.lost, totalSpent: openStats.totalSpent, totalPayout: openStats.totalPayout },
+    sweep:    { followed: sweepStats.followed },
     wsSample: marketList.slice(0, 16).map(m => {
       const { yesPrice, noPrice } = clobWs.getPrices(m.upTokenId, m.downTokenId);
       return { asset: m.asset, up: yesPrice, dn: noPrice, endMs: m.endMs };
@@ -974,9 +1210,11 @@ async function main() {
   setInterval(refreshMarkets,  CONFIG.refreshMs.marketRefresh);
   setInterval(fallbackScan,    CONFIG.refreshMs.scan);
   setInterval(monitor,         CONFIG.refreshMs.clob);
-  setInterval(lateEntryCheck,  2_000);
-  // setInterval(sniperCheck,     2_000); // disabled — high variance, low frequency
-  setInterval(fadeCheck,       2_000);
+  setInterval(lateEntryCheck,   2_000);
+  // setInterval(sniperCheck,      2_000); // disabled — high variance, low frequency
+  setInterval(fadeCheck,        2_000);
+  setInterval(marketOpenCheck,  3_000);
+  setInterval(macroSpikeCheck,  5_000);
   setInterval(() => saveSimState(simBalance), CONFIG.refreshMs.simSave);
   setInterval(async () => { try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ } }, 60_000);
   try { usdcBalance = await getUsdcBalance(); } catch { /* ignore */ }
@@ -1010,6 +1248,7 @@ async function main() {
 
   process.on("SIGINT", async () => {
     clobWs.close();
+    stopLiqFeed();
     for (const feed of Object.values(feeds)) feed.close();
     saveSimState(simBalance);
     for (const [, pos] of activePositions) await pos.cancelAll().catch(() => {});
