@@ -108,7 +108,10 @@ export class ClobWsFeed {
       } catch { /* ignore */ }
     });
 
+    let retried = false;
     const retry = () => {
+      if (retried) return; // "close" and "error" can both fire for one dropped connection
+      retried = true;
       this.connected = false;
       if (this._closed) return;
       try { this._ws?.terminate(); } catch { /* ignore */ }

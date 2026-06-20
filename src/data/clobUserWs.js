@@ -69,7 +69,10 @@ export class ClobUserWsFeed {
       } catch { /* ignore non-JSON */ }
     });
 
+    let retried = false;
     const retry = () => {
+      if (retried) return; // "close" and "error" can both fire for one dropped connection
+      retried = true;
       this.connected = false;
       clearInterval(this._pingTimer);
       if (this._closed) return;

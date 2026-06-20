@@ -46,7 +46,10 @@ export class BinanceWsFeed {
       } catch { /* ignore */ }
     });
 
+    let retried = false;
     const retry = () => {
+      if (retried) return; // "close" and "error" can both fire for one dropped connection
+      retried = true;
       if (this._closed) return;
       try { this._ws?.terminate(); } catch { /* ignore */ }
       const d = this._reconnDelay;
