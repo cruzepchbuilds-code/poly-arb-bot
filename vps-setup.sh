@@ -18,10 +18,10 @@ warn() { echo -e "${YELLOW}[warn]${RESET}  $*"; }
 log "Updating system packages..."
 apt-get update -qq && apt-get upgrade -y -qq
 
-# ── 2. Node.js 20 (LTS) via NodeSource ───────────────────────────────────────
-log "Installing Node.js 20..."
-if ! command -v node &>/dev/null || [[ "$(node -v)" != v20* ]]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
+# ── 2. Node.js 22 (LTS) via NodeSource ───────────────────────────────────────
+log "Installing Node.js 22..."
+if ! command -v node &>/dev/null || [[ "$(node -v)" != v22* ]]; then
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - > /dev/null 2>&1
   apt-get install -y nodejs -qq
 fi
 log "Node $(node -v)  |  npm $(npm -v)"
@@ -84,10 +84,10 @@ echo -e "${GREEN}║${RESET}  Logs stored at:                                   
 echo -e "${GREEN}║${RESET}    $BOT_DIR/logs/                     ${GREEN}║${RESET}"
 echo -e "${GREEN}║${RESET}                                                      ${GREEN}║${RESET}"
 echo -e "${GREEN}║${RESET}  To switch to LIVE trading:                          ${GREEN}║${RESET}"
-echo -e "${GREEN}║${RESET}    1. Edit ecosystem.config.cjs                      ${GREEN}║${RESET}"
-echo -e "${GREEN}║${RESET}    2. Uncomment the poly-arb-live block               ${GREEN}║${RESET}"
-echo -e "${GREEN}║${RESET}    3. Add your Polymarket API keys                   ${GREEN}║${RESET}"
-echo -e "${GREEN}║${RESET}    4. pm2 start ecosystem.config.cjs --only poly-arb-live ${GREEN}║${RESET}"
+echo -e "${GREEN}║${RESET}    1. Edit .env: set LIVE_MODE=true and fill in keys ${GREEN}║${RESET}"
+echo -e "${GREEN}║${RESET}    2. pm2 restart ecosystem.config.cjs --update-env  ${GREEN}║${RESET}"
+echo -e "${GREEN}║${RESET}       (restart by name reuses cached env — must use  ${GREEN}║${RESET}"
+echo -e "${GREEN}║${RESET}        the config file path to pick up .env changes) ${GREEN}║${RESET}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════╝${RESET}"
 echo ""
 pm2 status
