@@ -27,13 +27,22 @@ try {
   console.log("\nEOA balance:", b?.balance, "(raw:", JSON.stringify(b), ")");
 } catch (e) { console.log("\nEOA balance check failed:", e.message); }
 
-// Try with current proxy from .env
+// Try with current proxy from .env, as POLY_PROXY (email/magic-link accounts)
 if (process.env.POLY_PROXY_ADDRESS) {
   const proxyClient = new ClobClient("https://clob.polymarket.com", Chain.POLYGON, walletClient, creds, SignatureType.POLY_PROXY, process.env.POLY_PROXY_ADDRESS);
   try {
     const b = await proxyClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-    console.log("Proxy (.env) balance:", b?.balance, "(raw:", JSON.stringify(b), ")");
-  } catch (e) { console.log("Proxy (.env) balance check failed:", e.message); }
+    console.log("Proxy as POLY_PROXY balance:", b?.balance, "(raw:", JSON.stringify(b), ")");
+  } catch (e) { console.log("Proxy as POLY_PROXY balance check failed:", e.message); }
+}
+
+// Try with current proxy from .env, as POLY_GNOSIS_SAFE (browser-wallet accounts, e.g. MetaMask)
+if (process.env.POLY_PROXY_ADDRESS) {
+  const safeClient = new ClobClient("https://clob.polymarket.com", Chain.POLYGON, walletClient, creds, SignatureType.POLY_GNOSIS_SAFE, process.env.POLY_PROXY_ADDRESS);
+  try {
+    const b = await safeClient.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+    console.log("Proxy as POLY_GNOSIS_SAFE balance:", b?.balance, "(raw:", JSON.stringify(b), ")");
+  } catch (e) { console.log("Proxy as POLY_GNOSIS_SAFE balance check failed:", e.message); }
 }
 
 // Fetch correct proxy from Polymarket API

@@ -67,7 +67,12 @@ async function main() {
   console.log(`Wallet address: ${account.address}`);
 
   const proxy = env.POLY_PROXY_ADDRESS || undefined;
-  const sigType = proxy ? SignatureType.POLY_PROXY : SignatureType.EOA;
+  const sigTypeEnv = (env.POLY_SIGNATURE_TYPE || "GNOSIS_SAFE").toUpperCase();
+  const sigType = !proxy
+    ? SignatureType.EOA
+    : sigTypeEnv.includes("PROXY")
+      ? SignatureType.POLY_PROXY
+      : SignatureType.POLY_GNOSIS_SAFE;
 
   const client = new ClobClient(
     "https://clob.polymarket.com",
