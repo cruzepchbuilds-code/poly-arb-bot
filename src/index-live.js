@@ -1303,7 +1303,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 30_000 || remaining > 150_000) continue;
+      if (remaining < 15_000 || remaining > 200_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -1314,7 +1314,7 @@ async function main() {
 
       const delta = (currentPrice - openPrice) / openPrice;
       // Delta threshold scales with time left: more time = more chance of reversal
-      const minDelta = remaining > 100_000 ? 0.007 : remaining > 70_000 ? 0.005 : 0.003;
+      const minDelta = remaining > 120_000 ? 0.005 : remaining > 80_000 ? 0.003 : 0.002;
       if (Math.abs(delta) < minDelta) continue;
 
       const side    = delta > 0 ? "UP" : "DOWN";
@@ -1743,8 +1743,8 @@ async function main() {
 
       let side = null;
       let imbalance = 0;
-      if ((upImb ?? 0) > 0.75 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
-      else if ((dnImb ?? 0) > 0.75)                             { side = "DOWN"; imbalance = dnImb; }
+      if ((upImb ?? 0) > 0.70 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
+      else if ((dnImb ?? 0) > 0.70)                             { side = "DOWN"; imbalance = dnImb; }
       if (!side) continue;
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
