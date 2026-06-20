@@ -596,6 +596,8 @@ async function main() {
   const _confluentMarkets  = new Map(); // marketId → { lbTs, side } for confluence detection
   const _opsEntered        = new Set(); // prevent double-entering same market in openingPriceSnipe
   const _recentSettlements = new Map(); // asset → { side, settledAt } for consecutive carry
+  const _gammaResolution   = new Map(); // marketId → { side, confirmedAt } — gamma API certainty
+  const _gammaLastFetch    = new Map(); // marketId → lastFetchMs (rate-limit per market)
 
   // Per-asset CLOB liquidity cap — prevents pushing thin markets
   const ASSET_CLOB_CAP = {
@@ -1433,6 +1435,44 @@ async function main() {
     }
   };
 
+  // ── Gamma API resolution poller ───────────────────────────────────────────
+  // Polls Polymarket's gamma API for expired markets. When outcomePrices snaps
+  // to ["1","0"] or ["0","1"], we know the winner with certainty before CLOB LPs
+  // reprice. Complementary to the UMA on-chain feed (whichever fires first wins).
+  const _pollGammaResolutions = async () => {
+    const now = Date.now();
+    const toFetch = [];
+    for (const [id, market] of expiredMarketBuf) {
+      if (_gammaResolution.has(id)) continue;
+      if (_osEntered.has(id)) continue;
+      if (getUmaSettlement(market.asset, market.endMs)) continue;
+      const last = _gammaLastFetch.get(id) ?? 0;
+      if (now - last < 8_000) continue; // minimum 8s between re-fetches per market
+      const tier = OS_TIER[market.asset] ?? { maxMsPost: 30 * 60_000 };
+      if (now - market.endMs > tier.maxMsPost) continue;
+      toFetch.push([id, market]);
+    }
+    // At most 3 fetches per call to avoid rate-limiting the gamma API
+    for (const [id, market] of toFetch.slice(0, 3)) {
+      _gammaLastFetch.set(id, now);
+      try {
+        const res = await fetch(
+          `${CONFIG.gammaBaseUrl}/markets/${market.id}`,
+          { signal: AbortSignal.timeout(3000) },
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        let prices = [];
+        try { prices = JSON.parse(data.outcomePrices ?? "[]"); } catch { continue; }
+        if (!Array.isArray(prices) || prices.length < 2) continue;
+        const yesP = Number(prices[0]);
+        const noP  = Number(prices[1]);
+        if (yesP > 0.99)      { _gammaResolution.set(id, { side: "UP",   confirmedAt: now }); console.error(`[gr] ${market.asset} UP   confirmed (gamma API)`); }
+        else if (noP > 0.99)  { _gammaResolution.set(id, { side: "DOWN", confirmedAt: now }); console.error(`[gr] ${market.asset} DOWN confirmed (gamma API)`); }
+      } catch { /* network error — try again next cycle */ }
+    }
+  };
+
   // ── Strategy: OracleSnipe ─────────────────────────────────────────────────
   // After a 5-min market closes, the UMA oracle takes 2-10 minutes to settle.
   // Tokens remain tradeable on the CLOB during that window at stale prices.
@@ -1471,15 +1511,17 @@ async function main() {
       const osTier = OS_TIER[market.asset] ?? { maxMsPost: 30 * 60_000, minDelta: 0.003 };
       if (now - market.endMs > osTier.maxMsPost) continue;
 
-      // UMA on-chain settlement has priority — 100% certainty, no delta floor needed
+      // Resolution certainty: UMA on-chain (primary) or gamma API (secondary)
+      // Either gives 100% certainty — no delta floor needed, bet size boosted.
       const uma  = getUmaSettlement(market.asset, market.endMs);
+      const gr   = _gammaResolution.get(id);
+      const certain = uma ?? gr;
       const snap = _closeSnaps.get(id);
 
       let side, delta;
-      if (uma) {
-        side  = uma.side;
+      if (certain) {
+        side  = certain.side;
         delta = snap ? Math.abs((snap.closePrice - snap.openPrice) / snap.openPrice) : 0.001;
-        // UMA-confirmed: no delta floor (we know the outcome with certainty)
       } else {
         if (!snap) continue;
         delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
@@ -1491,10 +1533,10 @@ async function main() {
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
       if (ask == null || ask > 0.90) continue; // must still be underpriced
 
-      // UMA-confirmed entries get a 1.15× size boost (certainty = more conviction)
-      const umaMult = uma ? 1.15 : 1.0;
+      // Certain entries get a 1.15× boost (guaranteed winner = more conviction)
+      const certainMult = certain ? 1.15 : 1.0;
       const betSize = dynamicBetSize(market.asset, 0.20,
-        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier() * umaMult); // 20% (95% WR)
+        adaptive.getMultiplier(market.asset, "ORACLESNIPE") * getTimeMultiplier() * certainMult); // 20% (95% WR)
       if (betSize < CONFIG.minBetUsdc) continue;
 
       _osEntered.add(id);
@@ -1511,17 +1553,18 @@ async function main() {
             binanceOpenPrice: snap?.openPrice ?? 0,
             windowEndMs: market.endMs + 90 * 60_000,
           });
-          pos.oracleSnipe   = true;
+          pos.oracleSnipe    = true;
           pos.osUmaConfirmed = !!uma;
-          pos.osClosePrice  = snap?.closePrice ?? null;
-          pos.osDelta       = delta;
+          pos.osGrConfirmed  = !!gr;
+          pos.osClosePrice   = snap?.closePrice ?? null;
+          pos.osDelta        = delta;
           const entered = await pos.enter(ask, betSize);
           if (entered) {
             simBalance += betSize - (pos.totalSpent ?? 0);
             activePositions.set(id, pos);
             osStats.entered++;
-            const umaTag = uma ? "  UMA✓" : "";
-            console.error(`[os] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  $${betSize.toFixed(2)}  +${secsPostClose}s post-close${umaTag}`);
+            const srcTag = uma ? "  UMA✓" : gr ? "  GR✓" : "";
+            console.error(`[os] ${market.asset} ${side} @${ask.toFixed(3)}  Δ=${(delta*100).toFixed(2)}%  $${betSize.toFixed(2)}  +${secsPostClose}s post-close${srcTag}`);
           } else { simBalance += betSize; _osEntered.delete(id); }
         } catch { simBalance += betSize; _osEntered.delete(id); }
         finally { _reservedUsdc -= betSize; enteringMarkets.delete(id); }
@@ -2020,6 +2063,7 @@ async function main() {
   setInterval(monitor,         CONFIG.refreshMs.clob);
   setInterval(openingPriceSnipe,    500);  // TIER 0 — buy at market open before LPs calibrate
   setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
+  setInterval(_pollGammaResolutions, 3_000); // gamma API resolution certainty (complements UMA)
   setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
   setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
   setInterval(fundingSnipeCheck, 15_000);  // TIER 3 — extreme funding rate squeeze
