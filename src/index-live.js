@@ -1585,12 +1585,15 @@ async function main() {
       const certain = uma ?? gr;
       const snap = _closeSnaps.get(id);
 
+      // snap required regardless of certainty: osClosePrice (used at resolution) comes from snap.closePrice.
+      // Without it, resolveInSim gets null and silently refunds instead of settling the win.
+      if (!snap) continue;
+
       let side, delta;
       if (certain) {
         side  = certain.side;
-        delta = snap ? Math.abs((snap.closePrice - snap.openPrice) / snap.openPrice) : 0.001;
+        delta = Math.abs((snap.closePrice - snap.openPrice) / snap.openPrice);
       } else {
-        if (!snap) continue;
         delta = (snap.closePrice - snap.openPrice) / snap.openPrice;
         if (Math.abs(delta) < osTier.minDelta) continue;
         side  = delta > 0 ? "UP" : "DOWN";
