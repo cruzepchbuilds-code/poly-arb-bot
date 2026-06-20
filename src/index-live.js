@@ -7,6 +7,7 @@ import WebSocket from "ws";
 import { CONFIG } from "./config.js";
 import { fetchAllBinaryMarkets, fetchClobMidPrices } from "./data/polymarket.js";
 import { ClobWsFeed } from "./data/clobWs.js";
+import { getUserOrderFeed } from "./data/clobUserWs.js";
 import { logTrade, loadTrades } from "./data/logger.js";
 import { loadSimState, saveSimState } from "./data/simState.js";
 import { WindowPosition } from "./live/positions.js";
@@ -821,6 +822,8 @@ async function main() {
   });
 
   clobWs.connect();
+  const userWs = getUserOrderFeed(); // null if POLY_API_KEY not set — REST-only fallback
+  userWs?.connect();
 
   // Liquidation cascade — disabled, directional entries underperform live
   onLiquidationCascade(() => { return; });
@@ -854,6 +857,7 @@ async function main() {
       try { fade.recordOpen(market.id, openPx); } catch { /* ignore */ }
     }
     clobWs.addMarkets([...fresh, ...arbFresh]);
+    userWs?.addMarkets([...fresh, ...arbFresh].map(m => m.id));
     marketList = fresh;
     arbMarketList = arbFresh.filter(m => m.endMs > now);
   };
@@ -1978,6 +1982,7 @@ async function main() {
               lemStats.record(s);
               lateEntry.clearMarket(id);
               clobWs.removeMarket(id);
+              userWs?.removeMarket(id);
               activePositions.delete(id);
               continue;
             }
@@ -2004,6 +2009,7 @@ async function main() {
               }
               console.error(`[sl] ${pos.asset} ${pos.side} stop-loss @${tokenPrice.toFixed(3)}  entry=${pos.entryPrice.toFixed(3)}  recover=$${s.payout.toFixed(2)}`);
               clobWs.removeMarket(id);
+              userWs?.removeMarket(id);
               activePositions.delete(id);
               continue;
             }
@@ -2092,6 +2098,7 @@ async function main() {
               lateEntry.clearMarket(id);
             }
             clobWs.removeMarket(id);
+            userWs?.removeMarket(id);
             activePositions.delete(id);
           }
         } else {
@@ -2115,6 +2122,7 @@ async function main() {
             logTrade(s); allTradeHistory.push(s);
             stats.record(pos);
             clobWs.removeMarket(id);
+            userWs?.removeMarket(id);
             activePositions.delete(id);
           }
         }
@@ -2229,6 +2237,7 @@ async function main() {
 
   process.on("SIGINT", async () => {
     clobWs.close();
+    userWs?.close();
     stopLiqFeed();
     stopFuturesFeed();
     stopTradeFlow();

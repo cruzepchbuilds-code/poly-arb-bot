@@ -3,6 +3,7 @@ import { createSecureClient, relayerApiKey, OrderSide } from "@polymarket/client
 import { fetchBalanceAllowance, cancelOrder as depositCancelOrder, fetchOrder as depositFetchOrder } from "@polymarket/client/actions";
 import { privateKey } from "@polymarket/client/viem";
 import { getClient, isDepositWallet } from "./client.js";
+import { getUserOrderFeed } from "../data/clobUserWs.js";
 
 export const LIVE = process.env.LIVE_MODE === "true";
 const SHARES = Number(process.env.TRADE_SHARES) || 10;
@@ -84,6 +85,8 @@ export async function cancelOrder(orderId) {
 
 // Fetch live order status. Returns null if not found.
 // status: 'live' | 'matched' | 'cancelled' | 'expired' | unknown
+// REST is always queried as ground truth; the authenticated WS user feed (if
+// connected) only ever nudges sizeFilled/status up sooner — never replaces REST.
 export async function getOrderStatus(orderId) {
   if (!orderId || orderId.startsWith("SIM_")) {
     // Simulate a random fill after a few seconds
@@ -92,29 +95,34 @@ export async function getOrderStatus(orderId) {
     return { status: "live", sizeFilled: 0 };
   }
 
+  const pushed = getUserOrderFeed()?.getOrder(orderId) ?? null;
+
+  let rest;
   if (isDepositWallet()) {
     const secureClient = await getSecureClient();
     try {
       const order = await depositFetchOrder(secureClient, { orderId });
-      return {
-        status: order?.status ?? "unknown",
-        sizeFilled: Number(order?.size_matched ?? 0),
-      };
+      rest = { status: order?.status ?? "unknown", sizeFilled: Number(order?.size_matched ?? 0) };
     } catch {
-      return null;
+      rest = null;
+    }
+  } else {
+    const client = getClient();
+    try {
+      const order = await client.getOrder(orderId);
+      rest = { status: order?.status ?? "unknown", sizeFilled: Number(order?.size_matched ?? 0) };
+    } catch {
+      rest = null;
     }
   }
 
-  const client = getClient();
-  try {
-    const order = await client.getOrder(orderId);
-    return {
-      status: order?.status ?? "unknown",
-      sizeFilled: Number(order?.size_matched ?? 0),
-    };
-  } catch {
-    return null;
-  }
+  if (!rest) return pushed;
+  if (!pushed) return rest;
+
+  return {
+    status: (pushed.status === "matched" || rest.status === "matched") ? "matched" : rest.status,
+    sizeFilled: Math.max(rest.sizeFilled, pushed.sizeFilled),
+  };
 }
 
 // Get USDC balance (returns null on failure or in sim mode)
