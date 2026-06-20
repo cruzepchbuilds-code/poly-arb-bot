@@ -608,14 +608,14 @@ async function main() {
 
   // Per-asset OracleSnipe staleness window + delta floor (thin assets stay stale far longer)
   const OS_TIER = {
-    BTC:  { maxMsPost:  5 * 60_000, minDelta: 0.005 },
-    ETH:  { maxMsPost:  7 * 60_000, minDelta: 0.005 },
-    SOL:  { maxMsPost: 15 * 60_000, minDelta: 0.004 },
-    XRP:  { maxMsPost: 25 * 60_000, minDelta: 0.003 },
-    DOGE: { maxMsPost: 25 * 60_000, minDelta: 0.003 },
-    AVAX: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
-    LINK: { maxMsPost: 45 * 60_000, minDelta: 0.002 },
-    MATIC:{ maxMsPost: 60 * 60_000, minDelta: 0.001 },
+    BTC:  { maxMsPost:  6 * 60_000, minDelta: 0.005 },
+    ETH:  { maxMsPost:  8 * 60_000, minDelta: 0.005 },
+    SOL:  { maxMsPost: 17 * 60_000, minDelta: 0.004 },
+    XRP:  { maxMsPost: 28 * 60_000, minDelta: 0.003 },
+    DOGE: { maxMsPost: 28 * 60_000, minDelta: 0.003 },
+    AVAX: { maxMsPost: 50 * 60_000, minDelta: 0.002 },
+    LINK: { maxMsPost: 50 * 60_000, minDelta: 0.002 },
+    MATIC:{ maxMsPost: 67 * 60_000, minDelta: 0.001 },
   };
 
   // Seed observed win rate from previous runs so bankroll scaling is accurate on restart
@@ -1273,7 +1273,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 50_000 || remaining > 120_000) continue;
+      if (remaining < 40_000 || remaining > 130_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -1284,7 +1284,7 @@ async function main() {
 
       const delta = (currentPrice - openPrice) / openPrice;
       // Delta threshold scales with time left: more time = more chance of reversal
-      const minDelta = remaining > 100_000 ? 0.010 : remaining > 70_000 ? 0.007 : 0.005;
+      const minDelta = remaining > 100_000 ? 0.007 : remaining > 70_000 ? 0.005 : 0.003;
       if (Math.abs(delta) < minDelta) continue;
 
       const side    = delta > 0 ? "UP" : "DOWN";
@@ -1702,8 +1702,8 @@ async function main() {
 
       let side = null;
       let imbalance = 0;
-      if ((upImb ?? 0) > 0.80 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
-      else if ((dnImb ?? 0) > 0.80)                             { side = "DOWN"; imbalance = dnImb; }
+      if ((upImb ?? 0) > 0.75 && (upImb ?? 0) > (dnImb ?? 0)) { side = "UP"; imbalance = upImb; }
+      else if ((dnImb ?? 0) > 0.75)                             { side = "DOWN"; imbalance = dnImb; }
       if (!side) continue;
 
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
@@ -1785,7 +1785,7 @@ async function main() {
       const { yesPrice, noPrice } = clobWs.getPrices(market.upTokenId, market.downTokenId);
       if (!yesPrice || !noPrice) continue;
       // Must be near 50/50 — if it's directional, skip (adverse selection risk)
-      if (Math.abs(yesPrice - 0.50) > 0.04 || Math.abs(noPrice - 0.50) > 0.04) continue;
+      if (Math.abs(yesPrice - 0.50) > 0.05 || Math.abs(noPrice - 0.50) > 0.05) continue;
 
       // Skip if any signal says market is NOT 50/50
       const oiDelta = getOIDelta(market.asset, 120_000);
@@ -1800,7 +1800,7 @@ async function main() {
       if (!upBid || !dnBid) continue;
 
       // Total cost if both fill: upBid + dnBid < 1.00 → guaranteed profit at settlement
-      if (upBid + dnBid >= 0.96) continue; // need at least 4¢ margin
+      if (upBid + dnBid >= 0.98) continue; // need at least 2¢ margin (rebate covers the rest)
 
       const betSize = dynamicBetSize(market.asset, 0.05, 1.0);
       if (betSize < CONFIG.minBetUsdc * 2) continue; // need enough for both sides
@@ -2085,10 +2085,10 @@ async function main() {
   setInterval(openingPriceSnipe,    500);  // TIER 0 — buy at market open before LPs calibrate
   setInterval(oracleSnipeCheck,     500);  // TIER 1 — post-close stale CLOB (99% WR)
   setInterval(_pollGammaResolutions, 3_000); // gamma API resolution certainty (complements UMA)
-  setInterval(latencyBondCheck,   1_000);  // TIER 2 — Binance lag arb, OI+volume filtered
+  setInterval(latencyBondCheck,     500);  // TIER 2 — Binance lag arb, OI+volume filtered
   setInterval(() => clobWs.setThreshold(getThreshold()), 10_000); // adaptive ARB threshold
-  setInterval(fundingSnipeCheck, 15_000);  // TIER 3 — extreme funding rate squeeze
-  setInterval(clobImbalanceCheck,  1_000); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
+  setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — extreme funding rate squeeze
+  setInterval(clobImbalanceCheck,    500); // TIER 4 — CLOB order book imbalance (guarded by _isCiRunning)
   setInterval(makerRebateCheck,   30_000); // TIER 5 — market-neutral maker rebate farming
   setInterval(makerRebateMonitor,  5_000); // MR fill checker
   setInterval(lateEntryCheck,   2_000);  // disabled inside (25-27% live WR)
