@@ -41,8 +41,8 @@ const LIVE          = process.env.LIVE_MODE === "true";
 // Bankroll params
 const START_BALANCE  = Number(process.env.START_BALANCE)  || 63;
 const BET_PCT        = Number(process.env.BET_PCT)        || 0.15;  // 15% per trade
-const MAX_DEPLOY_PCT = Number(process.env.MAX_DEPLOY_PCT) || 0.40;  // 40% max deployed
-const MAX_POSITIONS  = Number(process.env.MAX_POSITIONS)  || 3;
+const MAX_DEPLOY_PCT = Number(process.env.MAX_DEPLOY_PCT) || 0.50;  // 50% max deployed
+const MAX_POSITIONS  = Number(process.env.MAX_POSITIONS)  || 5;
 const FLOOR_USDC     = Number(process.env.FLOOR_USDC)     || 25;    // below this: shrink bets
 
 const GAMMA    = "https://gamma-api.polymarket.com";
@@ -242,16 +242,28 @@ async function pollWallet(wallet) {
   const prev = knownHoldings.get(wallet) ?? new Set();
   const curr = new Set();
 
+  let totalWeather = 0;
+  let totalNew = 0;
+
   // Collect new weather positions, sort secondary cities first
   const newWeather = [];
   for (const pos of positions) {
     const tokenId = String(pos.asset ?? pos.tokenId ?? pos.token_id ?? "");
     if (!tokenId) continue;
     curr.add(tokenId);
-    if (!prev.has(tokenId) && !entered.has(tokenId) && isWeatherMarket(pos)) {
-      newWeather.push(pos);
+    const isWeather = isWeatherMarket(pos);
+    if (isWeather) totalWeather++;
+    if (!prev.has(tokenId) && !entered.has(tokenId)) {
+      if (isWeather) {
+        totalNew++;
+        newWeather.push(pos);
+      }
     }
   }
+
+  // Always log a scan summary so you can see what's happening
+  const firstPoll = prev.size === 0;
+  log(`SCAN  ${wallet.slice(0,10)}...  ${positions.length} positions | ${totalWeather} weather | ${totalNew} new${firstPoll ? " (first poll — seeding)" : ""}`);
 
   // Process highest-priority cities first
   newWeather.sort((a, b) => cityPriority(a) - cityPriority(b));
@@ -263,13 +275,19 @@ async function pollWallet(wallet) {
   knownHoldings.set(wallet, curr);
 }
 
-// ── Resolve expired positions (sim only — live resolves on-chain) ─────────────
+// ── Resolve expired positions ─────────────────────────────────────────────────
 function expireStale() {
-  if (LIVE) return; // live positions resolve on-chain, don't touch them
   const now = Date.now();
   for (const [tokenId, pos] of openPositions) {
-    if (pos.endMs && pos.endMs < now - 5 * 60_000) {
-      // Conservatively treat expired sim positions as lost
+    if (!pos.endMs || pos.endMs >= now - 5 * 60_000) continue;
+
+    if (LIVE) {
+      // In live mode we don't know the real payout — just free the slot so new
+      // trades can be entered. P&L is tracked on-chain, not here.
+      openPositions.delete(tokenId);
+      log(`EXPR  ${fmt(pos.title)} — freed live slot (resolved on-chain)`);
+    } else {
+      // Sim: conservatively treat expired positions as lost
       const pnl = bank.close(pos.cost, 0);
       openPositions.delete(tokenId);
       log(`EXPR  ${fmt(pos.title)} — expired from sim book  pnl=${fmtUsd(pnl)}`);
