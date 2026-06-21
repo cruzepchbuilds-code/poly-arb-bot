@@ -350,7 +350,7 @@ function render({
   }
 
   out.push(row(""));
-  out.push(sec("CLOSESNIPE  (buy near-certain side @$0.99 — last 10-60s, ask 0.85-0.99)"));
+  out.push(sec("CLOSESNIPE  (buy near-certain side @$0.99 — last 5-90s, ask 0.70-0.99)"));
   const csTotal  = csStats.won + csStats.lost;
   const csWr     = csTotal > 0 ? `${Math.round((csStats.won / csTotal) * 100)}%` : "--";
   const csPnl    = csStats.totalPayout - csStats.totalSpent;
@@ -362,7 +362,7 @@ function render({
     const pnlClr = csPnl >= 0 ? C.bgreen : C.bred;
     out.push(row(`P&L: ${pnlClr}${csPnl >= 0 ? "+" : ""}${fmtUsd(csPnl)}${C.reset}  │  Spent: ${fmtUsd(csStats.totalSpent)}`));
   } else {
-    out.push(row(`${C.dim}Watching final 10-60s of 5-min markets for a near-certain side...${C.reset}`));
+    out.push(row(`${C.dim}Watching final 5-90s of 5-min markets for a near-certain side...${C.reset}`));
   }
 
   out.push(row(""));
@@ -1486,20 +1486,22 @@ async function main() {
       if (ask == null || ask < 0.45 || ask > 0.70) continue;
 
       // OI delta filter: declining OI = squeeze/unwind (weak signal), skip
+      // Loosened to only skip a clear unwind, not minor noise — was blocking too much.
       const oiDelta = getOIDelta(market.asset, 120_000);
-      if (oiDelta !== null && oiDelta < -0.003) continue; // OI shrinking ≥0.3% → skip
+      if (oiDelta !== null && oiDelta < -0.008) continue;
       const oiMult = oiDelta !== null && oiDelta > 0.005 ? 1.2 : 1.0;
 
       // Volume spike confirmation: dying volume = fading move, skip; spike = stronger signal
       const spike = getVolumeSpike(market.asset);
-      if (spike !== null && spike < 0.5) continue; // volume < 50% of normal → momentum fading
+      if (spike !== null && spike < 0.35) continue; // was 0.5 — only skip clearly dead volume
       const spikeMult = spike !== null && spike > 4.0 ? 1.3 : 1.0; // 4× volume spike → 30% bigger
 
       // Buy/sell pressure alignment: must match direction
+      // Loosened bounds — only skip on a clear contradiction, not a mild one.
       const bp = getBuyPressure(market.asset);
       if (bp !== null) {
-        if (side === "UP"   && bp < 0.42) continue; // UP signal but sellers dominating
-        if (side === "DOWN" && bp > 0.58) continue; // DOWN signal but buyers dominating
+        if (side === "UP"   && bp < 0.38) continue;
+        if (side === "DOWN" && bp > 0.62) continue;
       }
 
       // Macro event multiplier (FOMC/CPI/NFP windows)
@@ -1550,8 +1552,8 @@ async function main() {
   };
 
   // ── Strategy: Close Snipe ─────────────────────────────────────────────────
-  // In the last 10-60s of a 5-min market, if Binance already confirms a side
-  // and that side's ask is in the 0.85-0.99 "almost certain but not yet priced
+  // In the last 5-90s of a 5-min market, if Binance already confirms a side
+  // and that side's ask is in the 0.70-0.99 "likely but not yet priced
   // at $1" zone, rest a limit buy at exactly $0.99. Either it crosses immediately
   // (ask already ≤ 0.99) or it sits there for an impatient seller who'd rather
   // exit now than wait out the last seconds for confirmed resolution. No early
@@ -1563,7 +1565,7 @@ async function main() {
       const wm = market.windowMins ?? 5;
       if (wm > 15) continue;
       const remaining = market.endMs - now;
-      if (remaining < 10_000 || remaining > 60_000) continue;
+      if (remaining < 5_000 || remaining > 90_000) continue;
       if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
       if (activePositions.size >= CONFIG.maxPositions) break;
 
@@ -1574,7 +1576,7 @@ async function main() {
       const side    = currentPrice > openPrice ? "UP" : "DOWN";
       const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
       const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
-      if (ask == null || ask < 0.85 || ask >= 0.99) continue;
+      if (ask == null || ask < 0.70 || ask >= 0.99) continue;
 
       const betSize = dynamicBetSize(market.asset, 1.0, 1);
       if (betSize < 4.95) continue; // can't clear Polymarket's real order-size minimum at this price
