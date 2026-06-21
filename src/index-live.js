@@ -2439,7 +2439,7 @@ async function main() {
   // setInterval(openingPriceSnipe,    500);  // TIER 0 — paused
   // setInterval(oracleSnipeCheck,     500);  // TIER 1 — paused
   // setInterval(_pollGammaResolutions, 3_000); // paused (used by OracleSnipe)
-  setInterval(latencyBondCheck,     500);  // TIER 2 — re-enabled, now on live Binance WS feed
+  // setInterval(latencyBondCheck,  500);  // TIER 2 — paused again: real on-chain data showed 0-for-4 (-$15.04), while every ARB/CloseSnipe-style trade in the same window won or lost small
   setInterval(closeSnipeCheck,      1_000);  // buy near-certain side at $0.99 in the last 10-60s
   setInterval(() => { clobWs.setThreshold(getThreshold()); clobWs.setMakerThreshold(CONFIG.makerArbThreshold); }, 10_000);
   // setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — paused
