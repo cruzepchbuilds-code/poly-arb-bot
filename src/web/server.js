@@ -12,7 +12,11 @@ function readJsonl(path, limit = 0) {
 
 export function startWebServer(getState, port = 3000) {
   const server = http.createServer((req, res) => {
-    const cors = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache" };
+    // no-cache still permits the browser to keep a copy and revalidate — that
+    // revalidation handshake is exactly what let a phone browser keep serving
+    // a stale snapshot of /api/state indefinitely. no-store forbids keeping
+    // a copy at all, which is what a live-updating dashboard actually needs.
+    const cors = { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store, no-cache, must-revalidate" };
 
     if (req.url === "/api/state") {
       res.writeHead(200, { "Content-Type": "application/json", ...cors });
@@ -35,7 +39,7 @@ export function startWebServer(getState, port = 3000) {
       return;
     }
 
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", ...cors });
     res.end(HTML);
   });
 
