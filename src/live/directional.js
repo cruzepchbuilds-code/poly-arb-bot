@@ -32,7 +32,12 @@ export class DirectionalPosition {
   async enter(price, maxUsdc) {
     this.entryPrice = price;
     this.shares     = Math.floor(maxUsdc / price);
-    if (this.shares < 1) { this._log("Shares too small"); return false; }
+    // Polymarket rejects orders below 5 shares or $1 notional
+    const minShares = Math.max(5, Math.ceil(1 / price));
+    if (this.shares < minShares) {
+      this._log(`Shares too small (${this.shares} < ${minShares} min)`);
+      return false;
+    }
     this.totalSpent = this.shares * price;
     this.enteredAt  = Date.now();
     this._log(
@@ -44,7 +49,7 @@ export class DirectionalPosition {
     } catch (e) {
       this._log(`Order failed: ${e.message}`);
     }
-    return true;
+    return !!this.order;
   }
 
   async tick() {

@@ -155,7 +155,7 @@ class DirectionalStats {
 
 function render({
   feedPrices, feedMoms, feeds, lateEntry,
-  activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats,
+  activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats, csStats,
   sweepStats, sniperStats, sniper, usdcBalance,
   walletAddr, opportunities, now, simBalance, expiredBuf,
   wsConnected, wsLastUpdate, wsMarkets,
@@ -347,6 +347,22 @@ function render({
     out.push(row(`P&L: ${pnlClr}${lbPnl >= 0 ? "+" : ""}${fmtUsd(lbPnl)}${C.reset}  │  Spent: ${fmtUsd(lbStats.totalSpent)}`));
   } else {
     out.push(row(`${C.dim}Watching for 5-min markets with 45-150s left and ≥0.5% Binance move...${C.reset}`));
+  }
+
+  out.push(row(""));
+  out.push(sec("CLOSESNIPE  (buy near-certain side @$0.99 — last 10-60s, ask 0.85-0.99)"));
+  const csTotal  = csStats.won + csStats.lost;
+  const csWr     = csTotal > 0 ? `${Math.round((csStats.won / csTotal) * 100)}%` : "--";
+  const csPnl    = csStats.totalPayout - csStats.totalSpent;
+  out.push(row(
+    `Entered: ${csStats.entered}  │  Won: ${C.green}${csStats.won}${C.reset}  │  ` +
+    `Lost: ${C.red}${csStats.lost}${C.reset}  │  Win rate: ${csTotal > 0 ? C.bgreen : C.dim}${csWr}${C.reset}`
+  ));
+  if (csStats.entered > 0) {
+    const pnlClr = csPnl >= 0 ? C.bgreen : C.bred;
+    out.push(row(`P&L: ${pnlClr}${csPnl >= 0 ? "+" : ""}${fmtUsd(csPnl)}${C.reset}  │  Spent: ${fmtUsd(csStats.totalSpent)}`));
+  } else {
+    out.push(row(`${C.dim}Watching final 10-60s of 5-min markets for a near-certain side...${C.reset}`));
   }
 
   out.push(row(""));
@@ -554,6 +570,7 @@ async function main() {
   const ciStats       = new DirectionalStats();  // CLOB order book imbalance signal
   const mrStats       = new DirectionalStats();  // maker rebate farming (market-neutral)
   const opsStats      = new DirectionalStats();  // opening price snipe (TIER 0)
+  const csStats       = new DirectionalStats();  // close snipe — buy near-certain side at $0.99 right before resolution
   const fade          = new FadeMomentum();
   const adaptive      = new AdaptiveSizer();
   let _analytics      = null;
@@ -1532,6 +1549,60 @@ async function main() {
     }
   };
 
+  // ── Strategy: Close Snipe ─────────────────────────────────────────────────
+  // In the last 10-60s of a 5-min market, if Binance already confirms a side
+  // and that side's ask is in the 0.85-0.99 "almost certain but not yet priced
+  // at $1" zone, rest a limit buy at exactly $0.99. Either it crosses immediately
+  // (ask already ≤ 0.99) or it sits there for an impatient seller who'd rather
+  // exit now than wait out the last seconds for confirmed resolution. No early
+  // exit / stop-loss — by design there's no real time left to react to anything.
+  const closeSnipeCheck = () => {
+    const now = Date.now();
+    for (const market of marketList) {
+      if (market.isRotation === false) continue;
+      const wm = market.windowMins ?? 5;
+      if (wm > 15) continue;
+      const remaining = market.endMs - now;
+      if (remaining < 10_000 || remaining > 60_000) continue;
+      if (activePositions.has(market.id) || enteringMarkets.has(market.id)) continue;
+      if (activePositions.size >= CONFIG.maxPositions) break;
+
+      const currentPrice = feeds[market.asset]?.get() ?? null;
+      const openPrice = lateEntry.getOpenPrice(market.id);
+      if (!currentPrice || !openPrice || currentPrice === openPrice) continue;
+
+      const side    = currentPrice > openPrice ? "UP" : "DOWN";
+      const tokenId = side === "UP" ? market.upTokenId : market.downTokenId;
+      const ask     = clobWs.getAsk(tokenId) ?? clobWs.getMid(tokenId);
+      if (ask == null || ask < 0.85 || ask >= 0.99) continue;
+
+      const betSize = dynamicBetSize(market.asset, 1.0, 1);
+      if (betSize < 4.95) continue; // can't clear Polymarket's real order-size minimum at this price
+
+      simBalance -= betSize;
+      _reservedUsdc += betSize;
+      enteringMarkets.add(market.id);
+      const binanceOpenPrice = openPrice;
+      (async () => {
+        try {
+          const pos = new DirectionalPosition({
+            id: market.id, asset: market.asset,
+            side, tokenId, binanceOpenPrice, windowEndMs: market.endMs,
+          });
+          pos.closeSnipe = true;
+          const entered = await pos.enter(0.99, betSize);
+          if (entered) {
+            simBalance += betSize - (pos.totalSpent ?? 0);
+            activePositions.set(market.id, pos);
+            csStats.entered++;
+            console.error(`[cs] ${market.asset} ${side} @0.99  ${Math.round(remaining / 1000)}s left  $${betSize.toFixed(2)}`);
+          } else { simBalance += betSize; }
+        } catch { simBalance += betSize; }
+        finally { _reservedUsdc -= betSize; enteringMarkets.delete(market.id); }
+      })();
+    }
+  };
+
   // ── Strategy: Opening Price Snipe (TIER 0) ───────────────────────────────
   // When a new 5-min market opens, the CLOB starts near 0.50/0.50 regardless of where
   // Binance is. If Binance is already trending ≥0.3% BEFORE the market even exists,
@@ -2191,6 +2262,11 @@ async function main() {
                 adaptive.record(pos.asset, "LATENCYBOND", s.won);
                 if (s.won === true) _recentSettlements.set(pos.asset, { side: s.side, settledAt: Date.now() });
               }
+            } else if (pos.closeSnipe) {
+              const _tcs = { ...s, strategy: "CLOSESNIPE" };
+              logTrade(_tcs); allTradeHistory.push(_tcs);
+              csStats.record(s);
+              if (s.won !== null) adaptive.record(pos.asset, "CLOSESNIPE", s.won);
             } else if (pos.sniper) {
               const _ts = { ...s, strategy: "SNIPER" };
               logTrade(_ts); allTradeHistory.push(_ts);
@@ -2362,6 +2438,7 @@ async function main() {
   // setInterval(oracleSnipeCheck,     500);  // TIER 1 — paused
   // setInterval(_pollGammaResolutions, 3_000); // paused (used by OracleSnipe)
   setInterval(latencyBondCheck,     500);  // TIER 2 — re-enabled, now on live Binance WS feed
+  setInterval(closeSnipeCheck,      1_000);  // buy near-certain side at $0.99 in the last 10-60s
   setInterval(() => { clobWs.setThreshold(getThreshold()); clobWs.setMakerThreshold(CONFIG.makerArbThreshold); }, 10_000);
   // setInterval(fundingSnipeCheck, 10_000);  // TIER 3 — paused
   // setInterval(clobImbalanceCheck,    500); // TIER 4 — paused
@@ -2394,7 +2471,7 @@ async function main() {
       feedPrices:   Object.fromEntries(Object.entries(feeds).map(([a, f]) => [a, f.get()])),
       feedMoms:     Object.fromEntries(CONFIG.assets.map((a) => [a, getMomentum(a)])),
       feeds, lateEntry,
-      activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats,
+      activePositions, stats, lemStats, lbStats, osStats, fsStats, ciStats, mrStats, opsStats, csStats,
       sweepStats, sniperStats, sniper, usdcBalance, walletAddr,
       expiredBuf: expiredMarketBuf.size,
       opportunities: getOpportunities(),
@@ -2435,6 +2512,8 @@ async function main() {
     const ciWr   = (ciStats.won + ciStats.lost) > 0 ? `${Math.round(ciStats.won / (ciStats.won + ciStats.lost) * 100)}%` : "--";
     const opsPnl = opsStats.totalPayout - opsStats.totalSpent;
     const opsWr  = (opsStats.won + opsStats.lost) > 0 ? `${Math.round(opsStats.won / (opsStats.won + opsStats.lost) * 100)}%` : "--";
+    const csPnl  = csStats.totalPayout - csStats.totalSpent;
+    const csWr   = (csStats.won + csStats.lost) > 0 ? `${Math.round(csStats.won / (csStats.won + csStats.lost) * 100)}%` : "--";
     process.stdout.write(
       `\n\nStopped.\n` +
       `ARB:           entered=${stats.entered}  both-filled=${stats.bothFilled}\n` +
@@ -2446,6 +2525,7 @@ async function main() {
       `FUNDINGSNIPE:  entered=${fsStats.entered}  won=${fsStats.won}  lost=${fsStats.lost}  WR=${fsWr}  P&L=${fmtUsd(fsPnl)}\n` +
       `CLOBIMB:       entered=${ciStats.entered}  won=${ciStats.won}  lost=${ciStats.lost}  WR=${ciWr}  P&L=${fmtUsd(ciPnl)}\n` +
       `MAKERREBATE:   pairs=${mrStats.entered}  P&L=${fmtUsd(mrPnl)}\n` +
+      `CLOSESNIPE:    entered=${csStats.entered}  won=${csStats.won}  lost=${csStats.lost}  WR=${csWr}  P&L=${fmtUsd(csPnl)}\n` +
       `Sim balance: ${fmtUsd(simBalance)} (saved)\n`
     );
     process.exit(0);
