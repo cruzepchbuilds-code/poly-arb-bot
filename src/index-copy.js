@@ -34,9 +34,10 @@ import { fmtUsd, fmtPct, sleep }         from "./utils.js";
 const WATCH_WALLETS = (process.env.WATCH_WALLETS || "")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
 
-const POLL_MS       = (Number(process.env.COPY_POLL_MIN)  || 10) * 60_000;
-const MIN_HOURS     =  Number(process.env.COPY_MIN_HOURS) || 2;
-const LIVE          = process.env.LIVE_MODE === "true";
+const POLL_MS        = (Number(process.env.COPY_POLL_MIN)  || 10) * 60_000;
+const MIN_HOURS      =  Number(process.env.COPY_MIN_HOURS) || 2;
+const LIVE           = process.env.LIVE_MODE === "true";
+const WEATHER_ONLY   = process.env.COPY_WEATHER_ONLY !== "false"; // default true; set false for crypto traders
 
 // Bankroll params
 const START_BALANCE  = Number(process.env.START_BALANCE)  || 63;
@@ -253,17 +254,17 @@ async function pollWallet(wallet) {
     curr.add(tokenId);
     const isWeather = isWeatherMarket(pos);
     if (isWeather) totalWeather++;
-    if (!prev.has(tokenId) && !entered.has(tokenId)) {
-      if (isWeather) {
-        totalNew++;
-        newWeather.push(pos);
-      }
+    const eligible = WEATHER_ONLY ? isWeather : true;
+    if (!prev.has(tokenId) && !entered.has(tokenId) && eligible) {
+      totalNew++;
+      newWeather.push(pos);
     }
   }
 
   // Always log a scan summary so you can see what's happening
   const firstPoll = prev.size === 0;
-  log(`SCAN  ${wallet.slice(0,10)}...  ${positions.length} positions | ${totalWeather} weather | ${totalNew} new${firstPoll ? " (first poll — seeding)" : ""}`);
+  const filterLabel = WEATHER_ONLY ? `${totalWeather} weather` : `${positions.length} all-markets`;
+  log(`SCAN  ${wallet.slice(0,10)}...  ${positions.length} positions | ${filterLabel} | ${totalNew} new${firstPoll ? " (first poll — seeding)" : ""}`);
 
   // Process highest-priority cities first
   newWeather.sort((a, b) => cityPriority(a) - cityPriority(b));
@@ -340,7 +341,7 @@ async function main() {
   console.log(`Bet per trade : ${(BET_PCT * 100).toFixed(0)}% of balance (→ ${fmtUsd(bank.betSize())} now)`);
   console.log(`Max deployed  : ${(MAX_DEPLOY_PCT * 100).toFixed(0)}% | Max positions: ${MAX_POSITIONS}`);
   console.log(`Floor         : reduce sizing below ${fmtUsd(FLOOR_USDC)}`);
-  console.log(`Poll every    : ${POLL_MS / 60_000} min | Min runway: ${MIN_HOURS}h`);
+  console.log(`Poll every    : ${POLL_MS / 60_000} min | Min runway: ${MIN_HOURS}h | Filter: ${WEATHER_ONLY ? "weather only" : "ALL markets"}`);
   console.log(`Mode          : ${LIVE ? "⚡ LIVE — REAL MONEY" : "🔵 SIM — no real orders"}`);
   console.log(`Watching      :\n${WATCH_WALLETS.map((w) => `  ${w}`).join("\n")}`);
   console.log("──────────────────────────────────────────\n");
