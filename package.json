@@ -4,6 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "copy": "node src/index-copy.js",
+    "weather": "node src/index-weather.js",
     "start": "node src/index.js",
     "live": "node src/index-live.js",
     "setup": "node setup.js",
